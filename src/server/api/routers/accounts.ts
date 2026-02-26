@@ -14,6 +14,7 @@ import {
   isUniqueConstraintError,
   listAccounts,
   listTransactionRules,
+  reapplyTransactionRulesForAllTransactions,
   updateTransactionRule,
   updateTransactionForAccount,
   type AccountRecord,
@@ -493,6 +494,24 @@ export const accountsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Failed to delete transaction rule.",
+        });
+      }
+    }),
+
+  reapplyRules: publicProcedure
+    .output(
+      z.object({
+        totalCount: z.number().int().nonnegative(),
+        updatedCount: z.number().int().nonnegative(),
+      })
+    )
+    .mutation(async () => {
+      try {
+        return await reapplyTransactionRulesForAllTransactions();
+      } catch {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to re-apply transaction rules.",
         });
       }
     }),

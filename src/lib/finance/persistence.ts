@@ -126,6 +126,10 @@ export type UpdateTransactionForAccountInput = {
 export type CreateTransactionRuleInput = TransactionRuleWriteInput;
 export type UpdateTransactionRuleInput = TransactionRuleWriteInput;
 export type { TransactionRuleRecord };
+export type ReapplyTransactionRulesResult = {
+  totalCount: number;
+  updatedCount: number;
+};
 
 function toNumberValue(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -705,6 +709,65 @@ export async function deleteTransactionRule(ruleId: number): Promise<boolean> {
 
   await db.delete(transactionRulesTable).where(eq(transactionRulesTable.id, ruleId));
   return true;
+}
+
+export async function reapplyTransactionRulesForAllTransactions(): Promise<ReapplyTransactionRulesResult> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+  const preparedRules = await getPreparedTransactionRules();
+
+  const rows = await db
+    .select({
+      id: transactionsTable.id,
+      accountId: transactionsTable.accountId,
+      description: transactionsTable.description,
+      amountCents: transactionsTable.amountCents,
+      categoryHint: transactionsTable.categoryHint,
+      counterparty: transactionsTable.counterparty,
+    })
+    .from(transactionsTable);
+
+  if (rows.length === 0) {
+    return {
+      totalCount: 0,
+      updatedCount: 0,
+    };
+  }
+
+  let updatedCount = 0;
+
+  for (const row of rows) {
+    const amountCents = Math.abs(Math.trunc(toNumberValue(row.amountCents)));
+    const automationResult = applyPreparedTransactionRules(preparedRules, {
+      accountId: row.accountId,
+      description: row.description,
+      amountCents,
+    });
+
+    const nextCategoryHint = automationResult.categoryHint ?? null;
+    const nextCounterparty = automationResult.counterparty ?? null;
+    const currentCategoryHint = row.categoryHint ?? null;
+    const currentCounterparty = row.counterparty ?? null;
+
+    if (currentCategoryHint === nextCategoryHint && currentCounterparty === nextCounterparty) {
+      continue;
+    }
+
+    await db
+      .update(transactionsTable)
+      .set({
+        categoryHint: nextCategoryHint,
+        counterparty: nextCounterparty,
+      })
+      .where(eq(transactionsTable.id, row.id));
+
+    updatedCount += 1;
+  }
+
+  return {
+    totalCount: rows.length,
+    updatedCount,
+  };
 }
 
 async function countTransactionsForAccountIds(accountId: number, sourceIds: string[]): Promise<number> {

@@ -199,16 +199,19 @@ function summarizeActions(rule: RuleRecord): string {
 }
 
 export function RulesContent() {
+  const utils = trpc.useUtils();
   const accountsQuery = trpc.accounts.list.useQuery();
   const rulesQuery = trpc.accounts.listRules.useQuery();
   const createRuleMutation = trpc.accounts.createRule.useMutation();
   const updateRuleMutation = trpc.accounts.updateRule.useMutation();
   const deleteRuleMutation = trpc.accounts.deleteRule.useMutation();
+  const reapplyRulesMutation = trpc.accounts.reapplyRules.useMutation();
 
   const [draft, setDraft] = useState<RuleDraft>(() => createEmptyDraft());
   const [editingRuleId, setEditingRuleId] = useState<number | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
+  const [listSuccessMessage, setListSuccessMessage] = useState<string | null>(null);
   const [deletingRuleId, setDeletingRuleId] = useState<number | null>(null);
 
   const rules = useMemo(() => normalizeRules(rulesQuery.data), [rulesQuery.data]);
@@ -233,7 +236,7 @@ export function RulesContent() {
 
   const isEditing = editingRuleId !== null;
   const isSaving = createRuleMutation.isPending || updateRuleMutation.isPending;
-  const isMutating = isSaving || deleteRuleMutation.isPending;
+  const isMutating = isSaving || deleteRuleMutation.isPending || reapplyRulesMutation.isPending;
   const loadError = rulesQuery.error
     ? resolveErrorMessage(rulesQuery.error, "Failed to load rules.")
     : accountsQuery.error
@@ -244,6 +247,7 @@ export function RulesContent() {
     setDraft(createEmptyDraft());
     setEditingRuleId(null);
     setFormError(null);
+    setListSuccessMessage(null);
   }
 
   function startEditingRule(rule: RuleRecord): void {
@@ -251,6 +255,7 @@ export function RulesContent() {
     setEditingRuleId(rule.id);
     setFormError(null);
     setListError(null);
+    setListSuccessMessage(null);
   }
 
   function toggleAccountSelection(accountId: number): void {
@@ -322,6 +327,7 @@ export function RulesContent() {
     );
     setFormError(null);
     setListError(null);
+    setListSuccessMessage(null);
 
     try {
       if (isEditing && typeof editingRuleId === "number") {
@@ -356,6 +362,7 @@ export function RulesContent() {
 
     setDeletingRuleId(rule.id);
     setListError(null);
+    setListSuccessMessage(null);
 
     try {
       await deleteRuleMutation.mutateAsync({
@@ -373,13 +380,49 @@ export function RulesContent() {
     }
   }
 
+  async function handleReapplyRules(): Promise<void> {
+    if (reapplyRulesMutation.isPending) {
+      return;
+    }
+
+    setListError(null);
+    setListSuccessMessage(null);
+
+    try {
+      const result = await reapplyRulesMutation.mutateAsync();
+      await Promise.all([
+        utils.accounts.list.invalidate(),
+        utils.accounts.transactionsView.invalidate(),
+        utils.accounts.summaryView.invalidate(),
+      ]);
+
+      const transactionLabel = result.totalCount === 1 ? "transaction" : "transactions";
+      const updatedLabel = result.updatedCount === 1 ? "entry" : "entries";
+      setListSuccessMessage(
+        `Re-applied rules to ${result.totalCount} ${transactionLabel}. Updated ${result.updatedCount} ${updatedLabel}.`
+      );
+    } catch (error) {
+      setListError(resolveErrorMessage(error, "Could not re-apply rules."));
+    }
+  }
+
   return (
     <div className="animate-[tab-content-enter_280ms_cubic-bezier(0.22,1,0.36,1)] will-change-[opacity,transform]">
       <SectionShell
         title="Automation Rules"
         subtitle="Route incoming transactions into categories and counterparties with match conditions."
         action={
-          <div className="space-y-1 text-right">
+          <div className="space-y-2 text-right">
+            <button
+              type="button"
+              onClick={() => {
+                void handleReapplyRules();
+              }}
+              disabled={isMutating || !!loadError}
+              className="rounded-full border border-accent/35 bg-accent/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              {reapplyRulesMutation.isPending ? "Re-applying..." : "Re-Apply Rules"}
+            </button>
             <p className="font-mono text-xs text-muted">{rules.length} rules</p>
             <p className="font-mono text-xs text-muted">{accountChoices.length} accounts available</p>
           </div>
@@ -404,6 +447,11 @@ export function RulesContent() {
             ) : null}
             {listError ? (
               <p className="rounded-2xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{listError}</p>
+            ) : null}
+            {listSuccessMessage ? (
+              <p className="rounded-2xl border border-accent/30 bg-accent/10 p-3 text-sm text-accent">
+                {listSuccessMessage}
+              </p>
             ) : null}
 
             {rulesQuery.isPending && rules.length === 0 ? (

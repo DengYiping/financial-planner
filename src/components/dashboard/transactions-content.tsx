@@ -11,7 +11,7 @@ import {
 import { usePathname, useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { inferRouterOutputs } from "@trpc/server";
+import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
 import { SectionShell } from "@/components/dashboard/section-shell";
 import {
   formatCurrencyCents,
@@ -21,6 +21,7 @@ import {
 import type { AppRouter } from "@/server/api/routers/_app";
 import { trpc } from "@/trpc/react";
 
+type RouterInputs = inferRouterInputs<AppRouter>;
 type RouterOutputs = inferRouterOutputs<AppRouter>;
 type TransactionsView = RouterOutputs["accounts"]["transactionsView"];
 type TransactionRow = TransactionsView["transactions"][number];
@@ -49,6 +50,25 @@ type TransactionModalState = {
   draft: EditableTransactionDraft;
 };
 
+type RuleFromTransactionDraft = {
+  descriptionContains: string;
+  descriptionRegex: string;
+  amountExact: string;
+  amountMin: string;
+  amountMax: string;
+  accountIds: number[];
+  applyCategory: string;
+  assignCounterpartyFromRegexGroup: boolean;
+  priority: string;
+};
+
+type RuleFromTransactionModalState = {
+  sourceAccountName: string;
+  sourceTransactionId?: string;
+  sourceDescription: string;
+  draft: RuleFromTransactionDraft;
+};
+
 type AccountChoice = {
   id: number;
   name: string;
@@ -58,6 +78,7 @@ type AccountChoice = {
 
 const BOOKING_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const AMOUNT_PATTERN = /^\d+(?:[.,]\d{1,2})?$/;
+const RULE_DEFAULT_PRIORITY = "100";
 
 function getCategoryLabel(row: TransactionRow): string {
   return row.transaction.categoryHint ?? "Uncategorized";
@@ -80,6 +101,24 @@ function amountInputToCents(value: string): number | null {
 
   const cents = Math.round(parsed * 100);
   return cents > 0 ? cents : null;
+}
+
+function ruleAmountInputToCents(value: string): number | null | undefined {
+  const normalized = value.trim();
+  if (normalized.length === 0) {
+    return undefined;
+  }
+
+  if (!AMOUNT_PATTERN.test(normalized)) {
+    return null;
+  }
+
+  const parsed = Number.parseFloat(normalized.replace(",", "."));
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return Math.round(Math.abs(parsed) * 100);
 }
 
 function toEditableTransactionDraft(row: TransactionRow): EditableTransactionDraft {
@@ -117,6 +156,115 @@ function toCreateTransactionDraft(account: AccountChoice | undefined, fallbackCu
   };
 }
 
+function toCreateRuleDraftFromTransaction(draft: EditableTransactionDraft): RuleFromTransactionDraft {
+  return {
+    descriptionContains: draft.description,
+    descriptionRegex: "",
+    amountExact: draft.amount,
+    amountMin: "",
+    amountMax: "",
+    accountIds: draft.accountId > 0 ? [draft.accountId] : [],
+    applyCategory: draft.categoryHint,
+    assignCounterpartyFromRegexGroup: false,
+    priority: RULE_DEFAULT_PRIORITY,
+  };
+}
+
+type ParseCreateRulePayloadResult =
+  | { ok: true; value: RouterInputs["accounts"]["createRule"] }
+  | { ok: false; message: string };
+
+function parseCreateRulePayload(draft: RuleFromTransactionDraft): ParseCreateRulePayloadResult {
+  const parsedPriority = Number.parseInt(draft.priority.trim(), 10);
+  if (!Number.isFinite(parsedPriority)) {
+    return { ok: false, message: "Priority must be an integer." };
+  }
+
+  const amountExactCents = ruleAmountInputToCents(draft.amountExact);
+  if (amountExactCents === null) {
+    return {
+      ok: false,
+      message: "Exact amount must be a non-negative number with up to 2 decimal places.",
+    };
+  }
+
+  const amountMinCents = ruleAmountInputToCents(draft.amountMin);
+  if (amountMinCents === null) {
+    return {
+      ok: false,
+      message: "Minimum amount must be a non-negative number with up to 2 decimal places.",
+    };
+  }
+
+  const amountMaxCents = ruleAmountInputToCents(draft.amountMax);
+  if (amountMaxCents === null) {
+    return {
+      ok: false,
+      message: "Maximum amount must be a non-negative number with up to 2 decimal places.",
+    };
+  }
+
+  if (
+    typeof amountExactCents === "number" &&
+    (typeof amountMinCents === "number" || typeof amountMaxCents === "number")
+  ) {
+    return { ok: false, message: "Use either exact amount or min/max range, not both." };
+  }
+
+  if (
+    typeof amountMinCents === "number" &&
+    typeof amountMaxCents === "number" &&
+    amountMinCents > amountMaxCents
+  ) {
+    return { ok: false, message: "Minimum amount cannot exceed maximum amount." };
+  }
+
+  const descriptionContains = draft.descriptionContains.trim();
+  const descriptionRegex = draft.descriptionRegex.trim();
+  if (draft.assignCounterpartyFromRegexGroup && descriptionRegex.length === 0) {
+    return {
+      ok: false,
+      message: "Description regex is required when assigning counterparty from capture group.",
+    };
+  }
+
+  const applyCategory = draft.applyCategory.trim();
+  const accountIds = Array.from(
+    new Set(draft.accountIds.filter((accountId) => Number.isInteger(accountId) && accountId > 0))
+  ).sort((left, right) => left - right);
+
+  const hasCondition =
+    descriptionContains.length > 0 ||
+    descriptionRegex.length > 0 ||
+    typeof amountExactCents === "number" ||
+    typeof amountMinCents === "number" ||
+    typeof amountMaxCents === "number" ||
+    accountIds.length > 0;
+  if (!hasCondition) {
+    return { ok: false, message: "At least one condition is required." };
+  }
+
+  const hasAction = applyCategory.length > 0 || draft.assignCounterpartyFromRegexGroup;
+  if (!hasAction) {
+    return { ok: false, message: "At least one action is required." };
+  }
+
+  return {
+    ok: true,
+    value: {
+      descriptionContains: descriptionContains.length > 0 ? descriptionContains : undefined,
+      descriptionRegex: descriptionRegex.length > 0 ? descriptionRegex : undefined,
+      amountExactCents,
+      amountMinCents,
+      amountMaxCents,
+      accountIds: accountIds.length > 0 ? accountIds : undefined,
+      applyCategory: applyCategory.length > 0 ? applyCategory : undefined,
+      assignCounterpartyFromRegexGroup: draft.assignCounterpartyFromRegexGroup,
+      priority: parsedPriority,
+    },
+  };
+}
+
 export function TransactionsContent({ view }: TransactionsContentProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -128,10 +276,14 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
   const [accountFilterOpen, setAccountFilterOpen] = useState(false);
   const [categoryFilterOpen, setCategoryFilterOpen] = useState(false);
   const [transactionModal, setTransactionModal] = useState<TransactionModalState | null>(null);
+  const [ruleModal, setRuleModal] = useState<RuleFromTransactionModalState | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  const [ruleError, setRuleError] = useState<string | null>(null);
+  const [ruleNotice, setRuleNotice] = useState<string | null>(null);
   const accountsQuery = trpc.accounts.list.useQuery();
   const createTransactionMutation = trpc.accounts.createTransaction.useMutation();
   const deleteTransactionMutation = trpc.accounts.deleteTransaction.useMutation();
+  const createRuleMutation = trpc.accounts.createRule.useMutation();
   const accountFilterRef = useRef<HTMLDivElement | null>(null);
   const categoryFilterRef = useRef<HTMLDivElement | null>(null);
   const updateTransactionMutation = trpc.accounts.updateTransaction.useMutation();
@@ -146,15 +298,26 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
-      const isMutating =
+      const isTransactionMutating =
         updateTransactionMutation.isPending ||
         createTransactionMutation.isPending ||
         deleteTransactionMutation.isPending;
+      const isRuleMutating = createRuleMutation.isPending;
 
-      if (event.key === "Escape" && !isMutating) {
+      if (event.key === "Escape" && ruleModal && !isRuleMutating) {
+        event.preventDefault();
+        setRuleModal(null);
+        setRuleError(null);
+        return;
+      }
+
+      if (event.key === "Escape" && !ruleModal && !isTransactionMutating) {
         event.preventDefault();
         setTransactionModal(null);
+        setRuleModal(null);
         setEditError(null);
+        setRuleError(null);
+        setRuleNotice(null);
       }
     };
 
@@ -164,9 +327,11 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     };
   }, [
     transactionModal,
+    ruleModal,
     updateTransactionMutation.isPending,
     createTransactionMutation.isPending,
     deleteTransactionMutation.isPending,
+    createRuleMutation.isPending,
   ]);
 
   useEffect(() => {
@@ -213,6 +378,9 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
 
   function openEditModal(row: TransactionRow): void {
     setEditError(null);
+    setRuleError(null);
+    setRuleNotice(null);
+    setRuleModal(null);
     setTransactionModal({
       mode: "edit",
       draft: toEditableTransactionDraft(row),
@@ -223,13 +391,17 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     if (
       updateTransactionMutation.isPending ||
       createTransactionMutation.isPending ||
-      deleteTransactionMutation.isPending
+      deleteTransactionMutation.isPending ||
+      createRuleMutation.isPending
     ) {
       return;
     }
 
     setTransactionModal(null);
+    setRuleModal(null);
     setEditError(null);
+    setRuleError(null);
+    setRuleNotice(null);
   }
 
   function updateEditingField<Key extends keyof EditableTransactionDraft>(
@@ -284,9 +456,74 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
   function openCreateModal(): void {
     const fallbackCurrency = view.transactions[0]?.transaction.currency ?? "EUR";
     setEditError(null);
+    setRuleError(null);
+    setRuleNotice(null);
+    setRuleModal(null);
     setTransactionModal({
       mode: "create",
       draft: toCreateTransactionDraft(accountChoices[0], fallbackCurrency),
+    });
+  }
+
+  function openCreateRuleModalFromTransaction(): void {
+    if (!transactionModal || transactionModal.mode !== "edit") {
+      return;
+    }
+
+    setRuleError(null);
+    setRuleNotice(null);
+    setRuleModal({
+      sourceAccountName: transactionModal.draft.accountName,
+      sourceTransactionId: transactionModal.draft.transactionId,
+      sourceDescription: transactionModal.draft.description,
+      draft: toCreateRuleDraftFromTransaction(transactionModal.draft),
+    });
+  }
+
+  function closeCreateRuleModal(): void {
+    if (createRuleMutation.isPending) {
+      return;
+    }
+
+    setRuleModal(null);
+    setRuleError(null);
+  }
+
+  function updateRuleField<Key extends keyof RuleFromTransactionDraft>(
+    key: Key,
+    value: RuleFromTransactionDraft[Key]
+  ): void {
+    setRuleModal((current) => {
+      if (!current) {
+        return null;
+      }
+
+      return {
+        ...current,
+        draft: {
+          ...current.draft,
+          [key]: value,
+        },
+      };
+    });
+  }
+
+  function toggleRuleAccount(accountId: number): void {
+    setRuleModal((current) => {
+      if (!current) {
+        return null;
+      }
+
+      const selected = current.draft.accountIds.includes(accountId);
+      return {
+        ...current,
+        draft: {
+          ...current.draft,
+          accountIds: selected
+            ? current.draft.accountIds.filter((entry) => entry !== accountId)
+            : [...current.draft.accountIds, accountId],
+        },
+      };
     });
   }
 
@@ -366,6 +603,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
       }
 
       setTransactionModal(null);
+      setRuleModal(null);
       router.refresh();
     } catch (error) {
       setEditError(
@@ -403,9 +641,35 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
         transactionId: draft.transactionId,
       });
       setTransactionModal(null);
+      setRuleModal(null);
       router.refresh();
     } catch (error) {
       setEditError(resolveErrorMessage(error, "Could not delete transaction."));
+    }
+  }
+
+  async function handleCreateRuleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!ruleModal || createRuleMutation.isPending) {
+      return;
+    }
+
+    const parsed = parseCreateRulePayload(ruleModal.draft);
+    if (!parsed.ok) {
+      setRuleError(parsed.message);
+      return;
+    }
+
+    setRuleError(null);
+
+    try {
+      await createRuleMutation.mutateAsync(parsed.value);
+      setRuleModal(null);
+      setRuleNotice(
+        "Rule created. It will apply on future imports and manual transaction changes."
+      );
+    } catch (error) {
+      setRuleError(resolveErrorMessage(error, "Could not create rule from this transaction."));
     }
   }
 
@@ -563,7 +827,8 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
   const isModalMutating =
     updateTransactionMutation.isPending ||
     createTransactionMutation.isPending ||
-    deleteTransactionMutation.isPending;
+    deleteTransactionMutation.isPending ||
+    createRuleMutation.isPending;
   const selectedStartMonth = view.selectedStartMonth ?? "";
   const selectedEndMonth = view.selectedEndMonth ?? "";
 
@@ -1141,18 +1406,33 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                         {editError}
                       </p>
                     )}
+                    {ruleNotice && (
+                      <p className="rounded-xl border border-accent/30 bg-accent/10 px-3 py-2 text-sm text-accent">
+                        {ruleNotice}
+                      </p>
+                    )}
 
                     <div className="flex items-center justify-between gap-2">
-                      <div>
+                      <div className="flex items-center gap-2">
                         {transactionModal.mode === "edit" ? (
-                          <button
-                            type="button"
-                            onClick={() => void handleDeleteTransaction()}
-                            disabled={isModalMutating}
-                            className="rounded-full border border-danger/40 bg-danger/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-danger transition hover:bg-danger/20 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {deleteTransactionMutation.isPending ? "Deleting..." : "Delete"}
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={openCreateRuleModalFromTransaction}
+                              disabled={isModalMutating}
+                              className="rounded-full border border-accent/40 bg-accent/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              Create Rule
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteTransaction()}
+                              disabled={isModalMutating}
+                              className="rounded-full border border-danger/40 bg-danger/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-danger transition hover:bg-danger/20 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {deleteTransactionMutation.isPending ? "Deleting..." : "Delete"}
+                            </button>
+                          </>
                         ) : null}
                       </div>
 
@@ -1179,6 +1459,230 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                               : "Save Changes"}
                         </button>
                       </div>
+                    </div>
+                  </form>
+                </div>
+              </div>,
+              document.body
+            )
+          : null}
+
+        {isMounted && ruleModal
+          ? createPortal(
+              <div
+                className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/50 px-4 py-6"
+                onClick={closeCreateRuleModal}
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="transaction-rule-create-title"
+                  className="w-full max-w-2xl rounded-2xl border border-ink-soft/20 bg-surface p-5 shadow-[0_24px_90px_-40px_rgba(20,34,43,0.7)]"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 id="transaction-rule-create-title" className="text-base font-semibold text-foreground">
+                        Create Rule From Transaction
+                      </h3>
+                      <p className="mt-1 text-xs text-muted">
+                        {ruleModal.sourceAccountName}
+                        {ruleModal.sourceTransactionId ? ` · ${ruleModal.sourceTransactionId}` : ""}
+                      </p>
+                      <p className="mt-1 text-xs text-muted">
+                        Prefilled from: {ruleModal.sourceDescription}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={closeCreateRuleModal}
+                      disabled={createRuleMutation.isPending}
+                      className="rounded-full border border-ink-soft/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <form className="mt-5 space-y-4" onSubmit={(event) => void handleCreateRuleSubmit(event)}>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Description Contains
+                        <input
+                          type="text"
+                          value={ruleModal.draft.descriptionContains}
+                          onChange={(event) => {
+                            updateRuleField("descriptionContains", event.target.value);
+                          }}
+                          maxLength={500}
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Description Regex
+                        <input
+                          type="text"
+                          value={ruleModal.draft.descriptionRegex}
+                          onChange={(event) => {
+                            updateRuleField("descriptionRegex", event.target.value);
+                          }}
+                          maxLength={500}
+                          placeholder="e.g. ^Transfer to (.+)$"
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Amount Exact
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={ruleModal.draft.amountExact}
+                          onChange={(event) => {
+                            updateRuleField("amountExact", event.target.value);
+                          }}
+                          placeholder="0.00"
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Amount Min
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={ruleModal.draft.amountMin}
+                          onChange={(event) => {
+                            updateRuleField("amountMin", event.target.value);
+                          }}
+                          placeholder="0.00"
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Amount Max
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={ruleModal.draft.amountMax}
+                          onChange={(event) => {
+                            updateRuleField("amountMax", event.target.value);
+                          }}
+                          placeholder="0.00"
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="rounded-2xl border border-ink-soft/15 bg-surface/80 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">Account Set</p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            updateRuleField("accountIds", []);
+                          }}
+                          disabled={ruleModal.draft.accountIds.length === 0}
+                          className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {accountChoices.map((account) => {
+                          const isSelected = ruleModal.draft.accountIds.includes(account.id);
+
+                          return (
+                            <button
+                              key={account.id}
+                              type="button"
+                              onClick={() => {
+                                toggleRuleAccount(account.id);
+                              }}
+                              className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs transition ${
+                                isSelected
+                                  ? "border-accent/35 bg-accent/10 text-accent"
+                                  : "border-ink-soft/20 bg-surface text-foreground hover:border-ink-soft/35"
+                              }`}
+                            >
+                              <span className="inline-flex min-w-0 items-center gap-2">
+                                <span
+                                  className="inline-block h-2.5 w-2.5 rounded-full"
+                                  style={{ backgroundColor: account.color }}
+                                  aria-hidden
+                                />
+                                <span className="truncate">{account.name}</span>
+                              </span>
+                              <span className="font-mono text-[11px]">{isSelected ? "ON" : "OFF"}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Apply Category
+                        <input
+                          type="text"
+                          value={ruleModal.draft.applyCategory}
+                          onChange={(event) => {
+                            updateRuleField("applyCategory", event.target.value);
+                          }}
+                          maxLength={120}
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Priority
+                        <input
+                          type="number"
+                          step={1}
+                          value={ruleModal.draft.priority}
+                          onChange={(event) => {
+                            updateRuleField("priority", event.target.value);
+                          }}
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                    </div>
+
+                    <label className="inline-flex items-center gap-2 rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-xs font-semibold uppercase tracking-[0.1em] text-muted">
+                      <input
+                        type="checkbox"
+                        checked={ruleModal.draft.assignCounterpartyFromRegexGroup}
+                        onChange={(event) => {
+                          updateRuleField("assignCounterpartyFromRegexGroup", event.target.checked);
+                        }}
+                        className="h-3.5 w-3.5 rounded border-ink-soft/30"
+                      />
+                      Counterparty from regex capture #1
+                    </label>
+
+                    {ruleError ? (
+                      <p className="rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                        {ruleError}
+                      </p>
+                    ) : null}
+
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={closeCreateRuleModal}
+                        disabled={createRuleMutation.isPending}
+                        className="rounded-full border border-ink-soft/20 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={createRuleMutation.isPending}
+                        className="rounded-full border border-accent/40 bg-accent/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {createRuleMutation.isPending ? "Creating Rule..." : "Create Rule"}
+                      </button>
                     </div>
                   </form>
                 </div>
