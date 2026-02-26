@@ -1,8 +1,22 @@
 import "server-only";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NormalizedTransaction, StatementProvider } from "@/lib/parsers/types";
-import { accounts, transactions as transactionsTable } from "@/lib/server/db/schema";
+import {
+  accounts,
+  transactionRules as transactionRulesTable,
+  transactions as transactionsTable,
+} from "@/lib/server/db/schema";
 import { ensureFinanceSchema, getFinanceDb } from "@/lib/server/turso";
+import {
+  applyPreparedTransactionRules,
+  mapTransactionRuleRow,
+  prepareTransactionRules,
+  type PreparedTransactionRule,
+  type TransactionRuleRecord,
+  type TransactionRuleWriteInput,
+  type ValidatedTransactionRuleWriteInput,
+  validateAndNormalizeTransactionRuleInput,
+} from "@/lib/finance/rules";
 
 const MONTH_KEY_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
 
@@ -109,6 +123,10 @@ export type UpdateTransactionForAccountInput = {
   reference?: string;
 };
 
+export type CreateTransactionRuleInput = TransactionRuleWriteInput;
+export type UpdateTransactionRuleInput = TransactionRuleWriteInput;
+export type { TransactionRuleRecord };
+
 function toNumberValue(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -147,6 +165,35 @@ function parseRawJson(value: string): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+function toRulePersistenceValues(input: ValidatedTransactionRuleWriteInput): {
+  descriptionContains: string | null;
+  descriptionRegex: string | null;
+  amountMinCents: number | null;
+  amountMaxCents: number | null;
+  amountExactCents: number | null;
+  accountIdsJson: string | null;
+  applyCategory: string | null;
+  assignCounterpartyFromRegexGroup: boolean;
+  priority: number;
+} {
+  return {
+    descriptionContains: input.descriptionContains ?? null,
+    descriptionRegex: input.descriptionRegex ?? null,
+    amountMinCents: input.amountMinCents ?? null,
+    amountMaxCents: input.amountMaxCents ?? null,
+    amountExactCents: input.amountExactCents ?? null,
+    accountIdsJson: input.accountIds ? JSON.stringify(input.accountIds) : null,
+    applyCategory: input.applyCategory ?? null,
+    assignCounterpartyFromRegexGroup: input.assignCounterpartyFromRegexGroup,
+    priority: input.priority,
+  };
+}
+
+async function getPreparedTransactionRules(): Promise<PreparedTransactionRule[]> {
+  const rules = await listTransactionRules();
+  return prepareTransactionRules(rules);
 }
 
 async function listAccountSummaries(accountId?: number): Promise<AccountSummaryRecord[]> {
@@ -564,6 +611,102 @@ export async function deleteAccountById(accountId: number): Promise<boolean> {
   return true;
 }
 
+async function getTransactionRuleByIdInternal(ruleId: number): Promise<TransactionRuleRecord | null> {
+  const db = getFinanceDb();
+  const rows = await db
+    .select()
+    .from(transactionRulesTable)
+    .where(eq(transactionRulesTable.id, ruleId))
+    .limit(1);
+
+  const row = rows[0];
+  return row ? mapTransactionRuleRow(row) : null;
+}
+
+export async function listTransactionRules(): Promise<TransactionRuleRecord[]> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+  const rows = await db
+    .select()
+    .from(transactionRulesTable)
+    .orderBy(asc(transactionRulesTable.priority), asc(transactionRulesTable.id));
+
+  return rows.map((row) => mapTransactionRuleRow(row));
+}
+
+export async function createTransactionRule(
+  input: CreateTransactionRuleInput
+): Promise<TransactionRuleRecord> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+  const validatedInput = validateAndNormalizeTransactionRuleInput(input);
+
+  const inserted = await db
+    .insert(transactionRulesTable)
+    .values(toRulePersistenceValues(validatedInput))
+    .returning({
+      id: transactionRulesTable.id,
+    });
+
+  const insertedId = inserted[0]?.id;
+  if (typeof insertedId !== "number") {
+    throw new Error("Rule insert succeeded but rule id was not returned.");
+  }
+
+  const createdRule = await getTransactionRuleByIdInternal(insertedId);
+  if (!createdRule) {
+    throw new Error("Rule insert succeeded but rule could not be loaded.");
+  }
+
+  return createdRule;
+}
+
+export async function updateTransactionRule(
+  ruleId: number,
+  input: UpdateTransactionRuleInput
+): Promise<TransactionRuleRecord | null> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+  const validatedInput = validateAndNormalizeTransactionRuleInput(input);
+
+  const updated = await db
+    .update(transactionRulesTable)
+    .set({
+      ...toRulePersistenceValues(validatedInput),
+      updatedAt: sql`(CURRENT_TIMESTAMP)`,
+    })
+    .where(eq(transactionRulesTable.id, ruleId))
+    .returning({
+      id: transactionRulesTable.id,
+    });
+
+  if (updated.length === 0) {
+    return null;
+  }
+
+  return getTransactionRuleByIdInternal(ruleId);
+}
+
+export async function deleteTransactionRule(ruleId: number): Promise<boolean> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+
+  const existing = await db
+    .select({
+      id: transactionRulesTable.id,
+    })
+    .from(transactionRulesTable)
+    .where(eq(transactionRulesTable.id, ruleId))
+    .limit(1);
+
+  if (existing.length === 0) {
+    return false;
+  }
+
+  await db.delete(transactionRulesTable).where(eq(transactionRulesTable.id, ruleId));
+  return true;
+}
+
 async function countTransactionsForAccountIds(accountId: number, sourceIds: string[]): Promise<number> {
   if (sourceIds.length === 0) {
     return 0;
@@ -597,24 +740,34 @@ export async function importTransactionsForAccount(
 
   const uniqueSourceIds = Array.from(new Set(transactions.map((transaction) => transaction.id)));
   const beforeCount = await countTransactionsForAccountIds(accountId, uniqueSourceIds);
+  const preparedRules = await getPreparedTransactionRules();
 
   await db
     .insert(transactionsTable)
     .values(
-      transactions.map((transaction) => ({
-        accountId,
-        sourceId: transaction.id,
-        provider: transaction.provider,
-        bookingDate: transaction.bookingDate,
-        amountCents: Math.abs(Math.trunc(transaction.amountCents)),
-        currency: transaction.currency,
-        direction: transaction.direction,
-        description: transaction.description,
-        categoryHint: transaction.categoryHint ?? null,
-        counterparty: transaction.counterparty ?? null,
-        reference: transaction.reference ?? null,
-        rawJson: JSON.stringify(transaction.raw),
-      }))
+      transactions.map((transaction) => {
+        const amountCents = Math.abs(Math.trunc(transaction.amountCents));
+        const automationResult = applyPreparedTransactionRules(preparedRules, {
+          accountId,
+          description: transaction.description,
+          amountCents,
+        });
+
+        return {
+          accountId,
+          sourceId: transaction.id,
+          provider: transaction.provider,
+          bookingDate: transaction.bookingDate,
+          amountCents,
+          currency: transaction.currency,
+          direction: transaction.direction,
+          description: transaction.description,
+          categoryHint: automationResult.categoryHint ?? null,
+          counterparty: automationResult.counterparty ?? null,
+          reference: transaction.reference ?? null,
+          rawJson: JSON.stringify(transaction.raw),
+        };
+      })
     )
     .onConflictDoNothing({
       target: [transactionsTable.accountId, transactionsTable.sourceId],
@@ -636,6 +789,15 @@ export async function createTransactionForAccount(
 ): Promise<CreateTransactionForAccountResult> {
   await ensureFinanceSchema();
   const db = getFinanceDb();
+  const amountCents = Math.abs(Math.trunc(input.amountCents));
+  const preparedRules = await getPreparedTransactionRules();
+  const automationResult = applyPreparedTransactionRules(preparedRules, {
+    accountId,
+    description: input.description,
+    amountCents,
+    categoryHint: input.categoryHint,
+    counterparty: input.counterparty,
+  });
 
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const sourceId = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${attempt}`;
@@ -646,12 +808,12 @@ export async function createTransactionForAccount(
         sourceId,
         provider: input.provider,
         bookingDate: input.bookingDate,
-        amountCents: Math.abs(Math.trunc(input.amountCents)),
+        amountCents,
         currency: input.currency,
         direction: input.direction,
         description: input.description,
-        categoryHint: input.categoryHint ?? null,
-        counterparty: input.counterparty ?? null,
+        categoryHint: automationResult.categoryHint ?? null,
+        counterparty: automationResult.counterparty ?? null,
         reference: input.reference ?? null,
         rawJson: JSON.stringify({
           source: "manual",
@@ -703,6 +865,15 @@ export async function updateTransactionForAccount(
 ): Promise<boolean> {
   await ensureFinanceSchema();
   const db = getFinanceDb();
+  const amountCents = Math.abs(Math.trunc(input.amountCents));
+  const preparedRules = await getPreparedTransactionRules();
+  const automationResult = applyPreparedTransactionRules(preparedRules, {
+    accountId,
+    description: input.description,
+    amountCents,
+    categoryHint: input.categoryHint,
+    counterparty: input.counterparty,
+  });
 
   const existing = await db
     .select({
@@ -720,12 +891,12 @@ export async function updateTransactionForAccount(
     .update(transactionsTable)
     .set({
       bookingDate: input.bookingDate,
-      amountCents: Math.abs(Math.trunc(input.amountCents)),
+      amountCents,
       currency: input.currency,
       direction: input.direction,
       description: input.description,
-      categoryHint: input.categoryHint ?? null,
-      counterparty: input.counterparty ?? null,
+      categoryHint: automationResult.categoryHint ?? null,
+      counterparty: automationResult.counterparty ?? null,
       reference: input.reference ?? null,
     })
     .where(and(eq(transactionsTable.accountId, accountId), eq(transactionsTable.sourceId, transactionId)));

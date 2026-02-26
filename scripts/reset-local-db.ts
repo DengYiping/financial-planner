@@ -88,6 +88,7 @@ async function main(): Promise<void> {
 
   await client.execute("PRAGMA foreign_keys = OFF");
   await client.execute("DROP TABLE IF EXISTS transactions");
+  await client.execute("DROP TABLE IF EXISTS transaction_rules");
   await client.execute("DROP TABLE IF EXISTS accounts");
   await client.execute("PRAGMA foreign_keys = ON");
   process.stdout.write("Local finance tables dropped.\n");

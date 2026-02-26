@@ -80,7 +80,6 @@ export class AibStatementParser implements StatementParser {
       const accountIdentifier = accountColumn ? readCell(row, headerIndices[accountColumn]) : "";
       const description = readCell(row, headerIndices["Description"]);
       const reference = inferReference(description);
-      const counterparty = reference ? undefined : description;
 
       transactions.push({
         id: buildTransactionId({
@@ -97,8 +96,6 @@ export class AibStatementParser implements StatementParser {
         currency: "EUR",
         direction,
         description,
-        categoryHint: inferCategoryHint(description),
-        counterparty,
         reference,
         raw,
       });
@@ -282,26 +279,6 @@ function inferReference(description: string): string | undefined {
   }
   if (/^\d{8,}$/.test(normalized)) {
     return normalized;
-  }
-  return undefined;
-}
-
-function inferCategoryHint(description: string): string | undefined {
-  const normalized = description.toUpperCase();
-  if (normalized.includes("MORTGAGE") || normalized.includes("HOME LOAN")) {
-    return "housing";
-  }
-  if (normalized.includes("ASSURANCE") || normalized.includes("INSURANCE")) {
-    return "insurance";
-  }
-  if (normalized.includes("REVOLUT") || normalized.includes("TOP-UP")) {
-    return "transfer";
-  }
-  if (normalized.includes("FEE") || normalized.includes("STAMP DUTY")) {
-    return "fees";
-  }
-  if (normalized.includes("INTEREST")) {
-    return "interest";
   }
   return undefined;
 }

@@ -158,6 +158,28 @@ async function bootstrapSchema(db: LibSQLDatabase<typeof financeSchema>): Promis
     CREATE INDEX IF NOT EXISTS idx_transactions_account_booking_date
     ON transactions (account_id, booking_date DESC)
   `);
+
+  await db.run(sql`
+    CREATE TABLE IF NOT EXISTS transaction_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      description_contains TEXT,
+      description_regex TEXT,
+      amount_min_cents INTEGER,
+      amount_max_cents INTEGER,
+      amount_exact_cents INTEGER,
+      account_ids_json TEXT,
+      apply_category TEXT,
+      assign_counterparty_from_regex_group INTEGER NOT NULL DEFAULT 0 CHECK (assign_counterparty_from_regex_group IN (0, 1)),
+      priority INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+    )
+  `);
+
+  await db.run(sql`
+    CREATE INDEX IF NOT EXISTS idx_transaction_rules_priority
+    ON transaction_rules (priority ASC, id ASC)
+  `);
 }
 
 export async function resetFinanceSchemaForLocal(): Promise<void> {
@@ -169,6 +191,7 @@ export async function resetFinanceSchemaForLocal(): Promise<void> {
   const db = getFinanceDb();
   await db.run(sql`PRAGMA foreign_keys = OFF`);
   await db.run(sql`DROP TABLE IF EXISTS transactions`);
+  await db.run(sql`DROP TABLE IF EXISTS transaction_rules`);
   await db.run(sql`DROP TABLE IF EXISTS accounts`);
   await db.run(sql`PRAGMA foreign_keys = ON`);
 

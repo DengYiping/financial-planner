@@ -11,9 +11,10 @@ export function DashboardNav({ activeTab }: DashboardNavProps) {
   const overviewHref = tabPath("overview");
   const transactionsHref = tabPath("transactions");
   const accountSummaryHref = tabPath("account_summary");
+  const rulesHref = tabPath("rules");
 
   return (
-    <div className="mb-6 inline-flex rounded-full border border-ink-soft/15 bg-surface p-1">
+    <div className="mb-6 flex flex-wrap rounded-full border border-ink-soft/15 bg-surface p-1">
       <Link
         href={overviewHref}
         scroll={false}
@@ -46,6 +47,17 @@ export function DashboardNav({ activeTab }: DashboardNavProps) {
         }`}
       >
         Account Summary
+      </Link>
+      <Link
+        href={rulesHref}
+        scroll={false}
+        className={`rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition ${
+          activeTab === "rules"
+            ? "bg-accent text-white shadow-[0_8px_20px_-12px_rgba(6,115,166,0.9)]"
+            : "text-muted hover:text-foreground"
+        }`}
+      >
+        Rules
       </Link>
     </div>
   );

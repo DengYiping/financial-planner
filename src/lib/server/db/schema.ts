@@ -44,5 +44,31 @@ export const transactions = sqliteTable(
   })
 );
 
+export const transactionRules = sqliteTable(
+  "transaction_rules",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    descriptionContains: text("description_contains"),
+    descriptionRegex: text("description_regex"),
+    amountMinCents: integer("amount_min_cents"),
+    amountMaxCents: integer("amount_max_cents"),
+    amountExactCents: integer("amount_exact_cents"),
+    accountIdsJson: text("account_ids_json"),
+    applyCategory: text("apply_category"),
+    assignCounterpartyFromRegexGroup: integer("assign_counterparty_from_regex_group", {
+      mode: "boolean",
+    })
+      .notNull()
+      .default(false),
+    priority: integer("priority").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+    updatedAt: text("updated_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+  },
+  (table) => ({
+    priorityIdx: index("idx_transaction_rules_priority").on(table.priority, table.id),
+  })
+);
+
 export type AccountRow = typeof accounts.$inferSelect;
 export type TransactionRow = typeof transactions.$inferSelect;
+export type TransactionRuleRow = typeof transactionRules.$inferSelect;

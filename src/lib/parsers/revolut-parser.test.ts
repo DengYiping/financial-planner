@@ -70,6 +70,8 @@ test("revolut parser validates supported fixture shapes", () => {
       assert.equal(transaction.currency, fixture.expectedCurrency, fixture.name);
       assert.ok(transaction.description.length > 0, "description should not be empty");
       assert.ok(transaction.direction === "in" || transaction.direction === "out");
+      assert.equal(transaction.categoryHint, undefined);
+      assert.equal(transaction.counterparty, undefined);
     });
   });
 });
@@ -92,10 +94,10 @@ test("revolut parser uses completed date and handles fee-only charges", () => {
   assert.ok(chargeTransaction, "Expected to find stamp duty charge transaction");
   assert.equal(chargeTransaction.direction, "out");
   assert.equal(chargeTransaction.amountCents, 3000);
-  assert.equal(chargeTransaction.categoryHint, "fees");
+  assert.equal(chargeTransaction.categoryHint, undefined);
 });
 
-test("revolut parser infers counterparty for transfer descriptions", () => {
+test("revolut parser does not infer transfer counterparties", () => {
   const result = parseStatement("revolut", {
     csvContent: EURO_ACCOUNT_CSV,
     fileName: "euro account.csv",
@@ -105,11 +107,11 @@ test("revolut parser infers counterparty for transfer descriptions", () => {
     transaction.description.startsWith("Transfer from ")
   );
   assert.ok(fromTransfer, "Expected at least one transfer-from transaction");
-  assert.equal(fromTransfer.counterparty, fromTransfer.description.replace("Transfer from ", ""));
+  assert.equal(fromTransfer.counterparty, undefined);
 
   const toTransfer = result.transactions.find((transaction) =>
     transaction.description.startsWith("Transfer to ")
   );
   assert.ok(toTransfer, "Expected at least one transfer-to transaction");
-  assert.equal(toTransfer.counterparty, toTransfer.description.replace("Transfer to ", ""));
+  assert.equal(toTransfer.counterparty, undefined);
 });

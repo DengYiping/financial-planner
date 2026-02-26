@@ -3,7 +3,9 @@ import { z } from "zod";
 import {
   createTransactionForAccount,
   createAccount,
+  createTransactionRule,
   deleteAccountById,
+  deleteTransactionRule,
   deleteTransactionForAccount,
   getDashboardSummaryView,
   getDashboardTransactionsView,
@@ -11,9 +13,15 @@ import {
   importTransactionsForAccount,
   isUniqueConstraintError,
   listAccounts,
+  listTransactionRules,
+  updateTransactionRule,
   updateTransactionForAccount,
   type AccountRecord,
 } from "@/lib/finance/persistence";
+import {
+  TransactionRuleValidationError,
+  type TransactionRuleWriteInput,
+} from "@/lib/finance/rules";
 import type { StatementProvider } from "@/lib/parsers/types";
 import { createTRPCRouter, publicProcedure } from "@/server/api/trpc";
 
@@ -95,7 +103,122 @@ const summaryViewSchema = z.object({
   rows: z.array(summaryRowSchema),
 });
 
+const transactionRuleSchema = z.object({
+  id: z.number().int().positive(),
+  descriptionContains: z.string().min(1).max(500).optional(),
+  descriptionRegex: z.string().min(1).max(500).optional(),
+  amountMinCents: z.number().int().nonnegative().optional(),
+  amountMaxCents: z.number().int().nonnegative().optional(),
+  amountExactCents: z.number().int().nonnegative().optional(),
+  accountIds: z.array(accountIdSchema).min(1).optional(),
+  applyCategory: z.string().min(1).max(120).optional(),
+  assignCounterpartyFromRegexGroup: z.boolean(),
+  priority: z.number().int(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+const transactionRuleInputSchema = z
+  .object({
+    descriptionContains: z.string().trim().max(500).nullish(),
+    descriptionRegex: z.string().trim().max(500).nullish(),
+    amountMinCents: z.number().int().nonnegative().nullish(),
+    amountMaxCents: z.number().int().nonnegative().nullish(),
+    amountExactCents: z.number().int().nonnegative().nullish(),
+    accountIds: z.array(accountIdSchema).max(500).nullish(),
+    applyCategory: z.string().trim().max(120).nullish(),
+    assignCounterpartyFromRegexGroup: z.boolean().optional(),
+    priority: z.number().int(),
+  })
+  .superRefine((value, ctx) => {
+    const descriptionContains = normalizeOptionalText(value.descriptionContains);
+    const descriptionRegex = normalizeOptionalText(value.descriptionRegex);
+    const applyCategory = normalizeOptionalText(value.applyCategory);
+    const hasAccountIdCondition = Array.isArray(value.accountIds) && value.accountIds.length > 0;
+
+    if (descriptionRegex) {
+      try {
+        // Validate regex syntax at the API boundary.
+        new RegExp(descriptionRegex);
+      } catch {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["descriptionRegex"],
+          message: "descriptionRegex must be a valid regular expression.",
+        });
+      }
+    }
+
+    if (
+      typeof value.amountMinCents === "number" &&
+      typeof value.amountMaxCents === "number" &&
+      value.amountMinCents > value.amountMaxCents
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["amountMinCents"],
+        message: "amountMinCents must be less than or equal to amountMaxCents.",
+      });
+    }
+
+    if (
+      typeof value.amountExactCents === "number" &&
+      typeof value.amountMinCents === "number" &&
+      value.amountExactCents < value.amountMinCents
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["amountExactCents"],
+        message: "amountExactCents must be greater than or equal to amountMinCents.",
+      });
+    }
+
+    if (
+      typeof value.amountExactCents === "number" &&
+      typeof value.amountMaxCents === "number" &&
+      value.amountExactCents > value.amountMaxCents
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["amountExactCents"],
+        message: "amountExactCents must be less than or equal to amountMaxCents.",
+      });
+    }
+
+    if (value.assignCounterpartyFromRegexGroup === true && !descriptionRegex) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["assignCounterpartyFromRegexGroup"],
+        message: "assignCounterpartyFromRegexGroup requires descriptionRegex.",
+      });
+    }
+
+    const hasCondition =
+      typeof descriptionContains === "string" ||
+      typeof descriptionRegex === "string" ||
+      typeof value.amountMinCents === "number" ||
+      typeof value.amountMaxCents === "number" ||
+      typeof value.amountExactCents === "number" ||
+      hasAccountIdCondition;
+
+    if (!hasCondition) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "At least one condition is required.",
+      });
+    }
+
+    const hasAction = typeof applyCategory === "string" || value.assignCounterpartyFromRegexGroup === true;
+    if (!hasAction) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "At least one action is required.",
+      });
+    }
+  });
+
 type AccountKind = z.infer<typeof accountKindSchema>;
+type TransactionRuleInput = z.infer<typeof transactionRuleInputSchema>;
 
 function normalizeOptionalText(value: string | null | undefined): string | undefined {
   if (typeof value !== "string") {
@@ -104,6 +227,20 @@ function normalizeOptionalText(value: string | null | undefined): string | undef
 
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function toTransactionRuleWriteInput(input: TransactionRuleInput): TransactionRuleWriteInput {
+  return {
+    descriptionContains: normalizeOptionalText(input.descriptionContains),
+    descriptionRegex: normalizeOptionalText(input.descriptionRegex),
+    amountMinCents: input.amountMinCents ?? undefined,
+    amountMaxCents: input.amountMaxCents ?? undefined,
+    amountExactCents: input.amountExactCents ?? undefined,
+    accountIds: input.accountIds ?? undefined,
+    applyCategory: normalizeOptionalText(input.applyCategory),
+    assignCounterpartyFromRegexGroup: input.assignCounterpartyFromRegexGroup ?? false,
+    priority: input.priority,
+  };
 }
 
 function expectedProviderForKind(kind: AccountKind): StatementProvider {
@@ -244,6 +381,118 @@ export const accountsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Failed to delete account.",
+        });
+      }
+    }),
+
+  listRules: publicProcedure.output(z.array(transactionRuleSchema)).query(async () => {
+    try {
+      return await listTransactionRules();
+    } catch {
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: "Failed to load transaction rules.",
+      });
+    }
+  }),
+
+  createRule: publicProcedure
+    .input(transactionRuleInputSchema)
+    .output(transactionRuleSchema)
+    .mutation(async ({ input }) => {
+      try {
+        return await createTransactionRule(toTransactionRuleWriteInput(input));
+      } catch (error) {
+        if (error instanceof TransactionRuleValidationError) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: error.message,
+          });
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to create transaction rule.",
+        });
+      }
+    }),
+
+  updateRule: publicProcedure
+    .input(
+      z.object({
+        ruleId: z.number().int().positive(),
+        rule: transactionRuleInputSchema,
+      })
+    )
+    .output(transactionRuleSchema)
+    .mutation(async ({ input }) => {
+      try {
+        const updatedRule = await updateTransactionRule(
+          input.ruleId,
+          toTransactionRuleWriteInput(input.rule)
+        );
+
+        if (!updatedRule) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Transaction rule was not found.",
+          });
+        }
+
+        return updatedRule;
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        if (error instanceof TransactionRuleValidationError) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: error.message,
+          });
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to update transaction rule.",
+        });
+      }
+    }),
+
+  deleteRule: publicProcedure
+    .input(
+      z.object({
+        ruleId: z.number().int().positive(),
+      })
+    )
+    .output(
+      z.object({
+        ruleId: z.number().int().positive(),
+        deleted: z.literal(true),
+      })
+    )
+    .mutation(async ({ input }) => {
+      try {
+        const deleted = await deleteTransactionRule(input.ruleId);
+        if (!deleted) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Transaction rule was not found.",
+          });
+        }
+
+        return {
+          ruleId: input.ruleId,
+          deleted: true as const,
+        };
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to delete transaction rule.",
         });
       }
     }),

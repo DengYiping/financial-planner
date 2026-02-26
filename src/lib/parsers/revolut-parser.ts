@@ -90,8 +90,6 @@ export class RevolutStatementParser implements StatementParser {
         currency,
         direction,
         description,
-        categoryHint: inferCategoryHint(type, description),
-        counterparty: inferCounterparty(type, description),
         reference: inferReference(description),
         raw,
       });
@@ -259,46 +257,6 @@ function sanitizeToken(value: string, maxLength: number): string {
     .slice(0, maxLength);
 
   return token || "na";
-}
-
-function inferCategoryHint(type: string, description: string): string | undefined {
-  const normalizedType = type.toLowerCase();
-  const normalizedDescription = description.toLowerCase();
-
-  if (normalizedType.includes("card payment")) {
-    return "card";
-  }
-  if (normalizedType.includes("transfer")) {
-    return "transfer";
-  }
-  if (normalizedType.includes("exchange")) {
-    return "exchange";
-  }
-  if (normalizedType.includes("deposit")) {
-    return "income";
-  }
-  if (normalizedType.includes("charge") || normalizedDescription.includes("fee")) {
-    return "fees";
-  }
-
-  return undefined;
-}
-
-function inferCounterparty(type: string, description: string): string | undefined {
-  const normalizedType = type.toLowerCase();
-  const normalizedDescription = description.trim();
-  if (normalizedType.includes("transfer")) {
-    const fromPrefix = "Transfer from ";
-    const toPrefix = "Transfer to ";
-    if (normalizedDescription.startsWith(fromPrefix)) {
-      return normalizedDescription.slice(fromPrefix.length).trim();
-    }
-    if (normalizedDescription.startsWith(toPrefix)) {
-      return normalizedDescription.slice(toPrefix.length).trim();
-    }
-  }
-
-  return undefined;
 }
 
 function inferReference(description: string): string | undefined {
