@@ -251,6 +251,69 @@ type TagList = {
   }>;
 };
 
+type TagListRow = {
+  ownerId: number;
+  tagId: number;
+  tagName: string;
+};
+
+type ReplaceTagLinksOptions = {
+  tagIds: number[];
+  deleteAll: () => Promise<void>;
+  listExistingTagIds: () => Promise<number[]>;
+  deleteTagIds: (tagIds: number[]) => Promise<void>;
+  insertTagIds: (tagIds: number[]) => Promise<void>;
+};
+
+function toTagListMap(rows: TagListRow[]): Map<number, TagList> {
+  const tagsByOwnerId = new Map<number, TagList>();
+  rows.forEach((row) => {
+    const existing = tagsByOwnerId.get(row.ownerId);
+    if (existing) {
+      existing.tagIds.push(row.tagId);
+      existing.tagNames.push(row.tagName);
+      existing.tags.push({
+        id: row.tagId,
+        name: row.tagName,
+      });
+      return;
+    }
+
+    tagsByOwnerId.set(row.ownerId, {
+      tagIds: [row.tagId],
+      tagNames: [row.tagName],
+      tags: [
+        {
+          id: row.tagId,
+          name: row.tagName,
+        },
+      ],
+    });
+  });
+  return tagsByOwnerId;
+}
+
+async function replaceTagLinks(options: ReplaceTagLinksOptions): Promise<void> {
+  const normalizedTagIds = normalizeTagIds(options.tagIds);
+  if (normalizedTagIds.length === 0) {
+    await options.deleteAll();
+    return;
+  }
+
+  const existingTagIds = await options.listExistingTagIds();
+  const normalizedTagIdSet = new Set(normalizedTagIds);
+  const existingTagIdSet = new Set(existingTagIds);
+  const toDelete = existingTagIds.filter((tagId) => !normalizedTagIdSet.has(tagId));
+  const toInsert = normalizedTagIds.filter((tagId) => !existingTagIdSet.has(tagId));
+
+  if (toDelete.length > 0) {
+    await options.deleteTagIds(toDelete);
+  }
+  if (toInsert.length > 0) {
+    await options.insertTagIds(toInsert);
+  }
+}
+
 async function listTransactionTagLists(transactionIds: number[]): Promise<Map<number, TagList>> {
   if (transactionIds.length === 0) {
     return new Map();
@@ -259,7 +322,7 @@ async function listTransactionTagLists(transactionIds: number[]): Promise<Map<nu
   const db = getFinanceDb();
   const rows = await db
     .select({
-      transactionId: transactionTagsTable.transactionId,
+      ownerId: transactionTagsTable.transactionId,
       tagId: transactionTagsTable.tagId,
       tagName: tags.name,
     })
@@ -272,32 +335,7 @@ async function listTransactionTagLists(transactionIds: number[]): Promise<Map<nu
       asc(transactionTagsTable.tagId)
     );
 
-  const tagsByTransactionId = new Map<number, TagList>();
-  rows.forEach((row) => {
-    const existing = tagsByTransactionId.get(row.transactionId);
-    if (existing) {
-      existing.tagIds.push(row.tagId);
-      existing.tagNames.push(row.tagName);
-      existing.tags.push({
-        id: row.tagId,
-        name: row.tagName,
-      });
-      return;
-    }
-
-    tagsByTransactionId.set(row.transactionId, {
-      tagIds: [row.tagId],
-      tagNames: [row.tagName],
-      tags: [
-        {
-          id: row.tagId,
-          name: row.tagName,
-        },
-      ],
-    });
-  });
-
-  return tagsByTransactionId;
+  return toTagListMap(rows);
 }
 
 async function listTransactionRuleTagLists(ruleIds: number[]): Promise<Map<number, TagList>> {
@@ -308,7 +346,7 @@ async function listTransactionRuleTagLists(ruleIds: number[]): Promise<Map<numbe
   const db = getFinanceDb();
   const rows = await db
     .select({
-      transactionRuleId: transactionRuleTagsTable.transactionRuleId,
+      ownerId: transactionRuleTagsTable.transactionRuleId,
       tagId: transactionRuleTagsTable.tagId,
       tagName: tags.name,
     })
@@ -321,32 +359,7 @@ async function listTransactionRuleTagLists(ruleIds: number[]): Promise<Map<numbe
       asc(transactionRuleTagsTable.tagId)
     );
 
-  const tagsByRuleId = new Map<number, TagList>();
-  rows.forEach((row) => {
-    const existing = tagsByRuleId.get(row.transactionRuleId);
-    if (existing) {
-      existing.tagIds.push(row.tagId);
-      existing.tagNames.push(row.tagName);
-      existing.tags.push({
-        id: row.tagId,
-        name: row.tagName,
-      });
-      return;
-    }
-
-    tagsByRuleId.set(row.transactionRuleId, {
-      tagIds: [row.tagId],
-      tagNames: [row.tagName],
-      tags: [
-        {
-          id: row.tagId,
-          name: row.tagName,
-        },
-      ],
-    });
-  });
-
-  return tagsByRuleId;
+  return toTagListMap(rows);
 }
 
 async function addTransactionTags(transactionId: number, tagIds: number[]): Promise<void> {
@@ -370,91 +383,79 @@ async function addTransactionTags(transactionId: number, tagIds: number[]): Prom
 }
 
 async function replaceTransactionTags(transactionId: number, tagIds: number[]): Promise<void> {
-  const normalizedTagIds = normalizeTagIds(tagIds);
   const db = getFinanceDb();
-
-  if (normalizedTagIds.length === 0) {
-    await db.delete(transactionTagsTable).where(eq(transactionTagsTable.transactionId, transactionId));
-    return;
-  }
-
-  const existingRows = await db
-    .select({
-      tagId: transactionTagsTable.tagId,
-    })
-    .from(transactionTagsTable)
-    .where(eq(transactionTagsTable.transactionId, transactionId));
-
-  const existingTagIds = existingRows.map((row) => row.tagId);
-  const normalizedTagIdSet = new Set(normalizedTagIds);
-  const existingTagIdSet = new Set(existingTagIds);
-  const toDelete = existingTagIds.filter((tagId) => !normalizedTagIdSet.has(tagId));
-  const toInsert = normalizedTagIds.filter((tagId) => !existingTagIdSet.has(tagId));
-
-  if (toDelete.length > 0) {
-    await db
-      .delete(transactionTagsTable)
-      .where(
-        and(
-          eq(transactionTagsTable.transactionId, transactionId),
-          inArray(transactionTagsTable.tagId, toDelete)
-        )
+  await replaceTagLinks({
+    tagIds,
+    deleteAll: async () => {
+      await db.delete(transactionTagsTable).where(eq(transactionTagsTable.transactionId, transactionId));
+    },
+    listExistingTagIds: async () => {
+      const existingRows = await db
+        .select({
+          tagId: transactionTagsTable.tagId,
+        })
+        .from(transactionTagsTable)
+        .where(eq(transactionTagsTable.transactionId, transactionId));
+      return existingRows.map((row) => row.tagId);
+    },
+    deleteTagIds: async (toDelete) => {
+      await db
+        .delete(transactionTagsTable)
+        .where(
+          and(
+            eq(transactionTagsTable.transactionId, transactionId),
+            inArray(transactionTagsTable.tagId, toDelete)
+          )
+        );
+    },
+    insertTagIds: async (toInsert) => {
+      await db.insert(transactionTagsTable).values(
+        toInsert.map((tagId) => ({
+          transactionId,
+          tagId,
+        }))
       );
-  }
-
-  if (toInsert.length > 0) {
-    await db.insert(transactionTagsTable).values(
-      toInsert.map((tagId) => ({
-        transactionId,
-        tagId,
-      }))
-    );
-  }
+    },
+  });
 }
 
 async function replaceTransactionRuleTags(ruleId: number, tagIds: number[]): Promise<void> {
-  const normalizedTagIds = normalizeTagIds(tagIds);
   const db = getFinanceDb();
-
-  if (normalizedTagIds.length === 0) {
-    await db
-      .delete(transactionRuleTagsTable)
-      .where(eq(transactionRuleTagsTable.transactionRuleId, ruleId));
-    return;
-  }
-
-  const existingRows = await db
-    .select({
-      tagId: transactionRuleTagsTable.tagId,
-    })
-    .from(transactionRuleTagsTable)
-    .where(eq(transactionRuleTagsTable.transactionRuleId, ruleId));
-
-  const existingTagIds = existingRows.map((row) => row.tagId);
-  const normalizedTagIdSet = new Set(normalizedTagIds);
-  const existingTagIdSet = new Set(existingTagIds);
-  const toDelete = existingTagIds.filter((tagId) => !normalizedTagIdSet.has(tagId));
-  const toInsert = normalizedTagIds.filter((tagId) => !existingTagIdSet.has(tagId));
-
-  if (toDelete.length > 0) {
-    await db
-      .delete(transactionRuleTagsTable)
-      .where(
-        and(
-          eq(transactionRuleTagsTable.transactionRuleId, ruleId),
-          inArray(transactionRuleTagsTable.tagId, toDelete)
-        )
+  await replaceTagLinks({
+    tagIds,
+    deleteAll: async () => {
+      await db
+        .delete(transactionRuleTagsTable)
+        .where(eq(transactionRuleTagsTable.transactionRuleId, ruleId));
+    },
+    listExistingTagIds: async () => {
+      const existingRows = await db
+        .select({
+          tagId: transactionRuleTagsTable.tagId,
+        })
+        .from(transactionRuleTagsTable)
+        .where(eq(transactionRuleTagsTable.transactionRuleId, ruleId));
+      return existingRows.map((row) => row.tagId);
+    },
+    deleteTagIds: async (toDelete) => {
+      await db
+        .delete(transactionRuleTagsTable)
+        .where(
+          and(
+            eq(transactionRuleTagsTable.transactionRuleId, ruleId),
+            inArray(transactionRuleTagsTable.tagId, toDelete)
+          )
+        );
+    },
+    insertTagIds: async (toInsert) => {
+      await db.insert(transactionRuleTagsTable).values(
+        toInsert.map((tagId) => ({
+          transactionRuleId: ruleId,
+          tagId,
+        }))
       );
-  }
-
-  if (toInsert.length > 0) {
-    await db.insert(transactionRuleTagsTable).values(
-      toInsert.map((tagId) => ({
-        transactionRuleId: ruleId,
-        tagId,
-      }))
-    );
-  }
+    },
+  });
 }
 
 async function getPreparedTransactionRules(): Promise<PreparedTransactionRule[]> {

@@ -97,6 +97,11 @@ type TransactionTagBadge = {
   color: string;
 };
 
+type ParsedTagReference = {
+  id?: number;
+  name?: string;
+};
+
 const BOOKING_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const AMOUNT_PATTERN = /^\d+(?:[.,]\d{1,2})?$/;
 const RULE_DEFAULT_PRIORITY = "50";
@@ -148,27 +153,67 @@ function parseTagNames(value: unknown): string[] {
   return Array.from(deduped.values()).sort((left, right) => left.localeCompare(right));
 }
 
-function getTransactionTagIds(transaction: TransactionRow["transaction"]): number[] {
+function parseTagReferences(value: unknown): ParsedTagReference[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const dedupedById = new Set<number>();
+  const dedupedByName = new Set<string>();
+  const parsed: ParsedTagReference[] = [];
+
+  value.forEach((entry) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+
+    const record = entry as Record<string, unknown>;
+    const id = parseTagId(record.id) ?? undefined;
+    const rawName = typeof record.name === "string" ? record.name.trim() : "";
+    const name = rawName.length > 0 ? rawName : undefined;
+    if (typeof id !== "number" && !name) {
+      return;
+    }
+
+    if (typeof id === "number") {
+      if (dedupedById.has(id)) {
+        return;
+      }
+      dedupedById.add(id);
+      if (name) {
+        dedupedByName.add(name.toLowerCase());
+      }
+      parsed.push({ id, name });
+      return;
+    }
+
+    if (!name) {
+      return;
+    }
+
+    const nameKey = name.toLowerCase();
+    if (dedupedByName.has(nameKey)) {
+      return;
+    }
+    dedupedByName.add(nameKey);
+    parsed.push({ name });
+  });
+
+  return parsed;
+}
+
+function getTransactionTagIds(
+  transaction: TransactionRow["transaction"],
+  parsedTagReferences?: ParsedTagReference[]
+): number[] {
   const transactionRecord = transaction as unknown as Record<string, unknown>;
   const directIds = parseTagIds(transactionRecord.tagIds);
   if (directIds.length > 0) {
     return directIds;
   }
 
-  if (Array.isArray(transactionRecord.tags)) {
-    const nestedIds = parseTagIds(
-      transactionRecord.tags
-        .map((entry) =>
-          entry && typeof entry === "object" ? (entry as Record<string, unknown>).id : undefined
-        )
-        .filter(Boolean)
-    );
-    if (nestedIds.length > 0) {
-      return nestedIds;
-    }
-  }
-
-  return [];
+  const nestedRefs = parsedTagReferences ?? parseTagReferences(transactionRecord.tags);
+  return parseTagIds(nestedRefs.map((entry) => entry.id));
 }
 
 function getTransactionTagBadges(
@@ -176,42 +221,41 @@ function getTransactionTagBadges(
   tagById: Map<number, TagChoice>
 ): TransactionTagBadge[] {
   const transactionRecord = transaction as unknown as Record<string, unknown>;
-  const tagIds = getTransactionTagIds(transaction);
+  const parsedTagReferences = parseTagReferences(transactionRecord.tags);
+  const tagNameById = new Map<number, string>();
+  parsedTagReferences.forEach((entry) => {
+    if (typeof entry.id === "number" && entry.name && !tagNameById.has(entry.id)) {
+      tagNameById.set(entry.id, entry.name);
+    }
+  });
+
+  const tagIds = getTransactionTagIds(transaction, parsedTagReferences);
   if (tagIds.length > 0) {
     return tagIds.map((tagId) => {
       const tag = tagById.get(tagId);
       return {
         id: tagId,
-        name: tag?.name ?? `Tag #${tagId}`,
-        color: tag?.color ?? DEFAULT_TAG_COLOR,
+        name: tag?.name ?? tagNameById.get(tagId) ?? `Tag #${tagId}`,
+        color: tag?.color ?? tagAccent(tagId),
       };
     });
   }
 
-  if (Array.isArray(transactionRecord.tags)) {
-    const parsedFromObjects: TransactionTagBadge[] = [];
-    transactionRecord.tags.forEach((entry) => {
-      if (!entry || typeof entry !== "object") {
-        return;
-      }
-
-      const tag = entry as Record<string, unknown>;
-      const name = typeof tag.name === "string" ? tag.name.trim() : "";
-      if (name.length === 0) {
-        return;
-      }
-
-      const id = parseTagId(tag.id) ?? undefined;
-      parsedFromObjects.push({
-        id,
-        name,
-        color: id ? tagAccent(id) : DEFAULT_TAG_COLOR,
-      });
-    });
-
-    if (parsedFromObjects.length > 0) {
-      return parsedFromObjects;
+  const parsedBadges = parsedTagReferences.flatMap((entry) => {
+    if (!entry.name) {
+      return [];
     }
+
+    return [
+      {
+        id: entry.id,
+        name: entry.name,
+        color: typeof entry.id === "number" ? tagAccent(entry.id) : DEFAULT_TAG_COLOR,
+      },
+    ];
+  });
+  if (parsedBadges.length > 0) {
+    return parsedBadges;
   }
 
   const tagNames = parseTagNames(transactionRecord.tagHints ?? transactionRecord.tagNames);
