@@ -9,6 +9,7 @@ import {
   importTransactionsForAccount,
   isUniqueConstraintError,
   listAccounts,
+  updateTransactionForAccount,
   type AccountRecord,
 } from "@/lib/finance/persistence";
 import type { StatementProvider } from "@/lib/parsers/types";
@@ -94,6 +95,15 @@ const summaryViewSchema = z.object({
 });
 
 type AccountKind = z.infer<typeof accountKindSchema>;
+
+function normalizeOptionalText(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
 
 function expectedProviderForKind(kind: AccountKind): StatementProvider {
   if (kind === "aib_current" || kind === "aib_mortgage") {
@@ -365,6 +375,65 @@ export const accountsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Failed to import transactions.",
+        });
+      }
+    }),
+
+  updateTransaction: publicProcedure
+    .input(
+      z.object({
+        accountId: accountIdSchema,
+        transactionId: z.string().trim().min(1).max(160),
+        bookingDate: z.string().trim().regex(bookingDateRegex, "bookingDate must use YYYY-MM-DD format."),
+        amountCents: z.number().int().positive(),
+        currency: z.string().trim().min(1).max(16),
+        direction: z.enum(["in", "out"]),
+        description: z.string().trim().min(1).max(500),
+        categoryHint: z.string().trim().max(120).nullish(),
+        counterparty: z.string().trim().max(300).nullish(),
+        reference: z.string().trim().max(300).nullish(),
+      })
+    )
+    .output(
+      z.object({
+        accountId: accountIdSchema,
+        transactionId: z.string().trim().min(1).max(160),
+        updated: z.literal(true),
+      })
+    )
+    .mutation(async ({ input }) => {
+      try {
+        const updated = await updateTransactionForAccount(input.accountId, input.transactionId, {
+          bookingDate: input.bookingDate,
+          amountCents: input.amountCents,
+          currency: input.currency,
+          direction: input.direction,
+          description: input.description,
+          categoryHint: normalizeOptionalText(input.categoryHint),
+          counterparty: normalizeOptionalText(input.counterparty),
+          reference: normalizeOptionalText(input.reference),
+        });
+
+        if (!updated) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Transaction was not found for this account.",
+          });
+        }
+
+        return {
+          accountId: input.accountId,
+          transactionId: input.transactionId,
+          updated: true as const,
+        };
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to update transaction.",
         });
       }
     }),

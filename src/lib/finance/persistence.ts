@@ -83,6 +83,17 @@ export type ImportTransactionsResult = {
   skippedCount: number;
 };
 
+export type UpdateTransactionForAccountInput = {
+  bookingDate: string;
+  amountCents: number;
+  currency: string;
+  direction: "in" | "out";
+  description: string;
+  categoryHint?: string;
+  counterparty?: string;
+  reference?: string;
+};
+
 function toNumberValue(value: unknown): number {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -323,33 +334,15 @@ export async function getDashboardTransactionsView(
     rawJson: transactionsTable.rawJson,
   };
 
-  const rows = monthWhereClause
-    ? input.transactionTab === "recent"
-      ? await db
-          .select(transactionSelection)
-          .from(transactionsTable)
-          .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
-          .where(monthWhereClause)
-          .orderBy(...orderByColumns)
-          .limit(25)
-      : await db
-          .select(transactionSelection)
-          .from(transactionsTable)
-          .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
-          .where(monthWhereClause)
-          .orderBy(...orderByColumns)
-    : input.transactionTab === "recent"
-      ? await db
-          .select(transactionSelection)
-          .from(transactionsTable)
-          .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
-          .orderBy(...orderByColumns)
-          .limit(25)
-      : await db
-          .select(transactionSelection)
-          .from(transactionsTable)
-          .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
-          .orderBy(...orderByColumns);
+  const baseQuery = db
+    .select(transactionSelection)
+    .from(transactionsTable)
+    .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId));
+  const scopedQuery = monthWhereClause ? baseQuery.where(monthWhereClause) : baseQuery;
+  const rows =
+    input.transactionTab === "recent"
+      ? await scopedQuery.orderBy(...orderByColumns).limit(25)
+      : await scopedQuery.orderBy(...orderByColumns);
 
   const importedTransactionCount = await countImportedTransactions();
   const transactions: DashboardTransactionRow[] = rows.map((row) => {
@@ -607,6 +600,43 @@ export async function importTransactionsForAccount(
     insertedCount,
     skippedCount: transactions.length - insertedCount,
   };
+}
+
+export async function updateTransactionForAccount(
+  accountId: number,
+  transactionId: string,
+  input: UpdateTransactionForAccountInput
+): Promise<boolean> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+
+  const existing = await db
+    .select({
+      id: transactionsTable.id,
+    })
+    .from(transactionsTable)
+    .where(and(eq(transactionsTable.accountId, accountId), eq(transactionsTable.sourceId, transactionId)))
+    .limit(1);
+
+  if (existing.length === 0) {
+    return false;
+  }
+
+  await db
+    .update(transactionsTable)
+    .set({
+      bookingDate: input.bookingDate,
+      amountCents: Math.abs(Math.trunc(input.amountCents)),
+      currency: input.currency,
+      direction: input.direction,
+      description: input.description,
+      categoryHint: input.categoryHint ?? null,
+      counterparty: input.counterparty ?? null,
+      reference: input.reference ?? null,
+    })
+    .where(and(eq(transactionsTable.accountId, accountId), eq(transactionsTable.sourceId, transactionId)));
+
+  return true;
 }
 
 export function isUniqueConstraintError(error: unknown): boolean {

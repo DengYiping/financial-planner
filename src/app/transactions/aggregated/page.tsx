@@ -6,7 +6,6 @@ import { TransactionsContent } from "@/components/dashboard/transactions-content
 import { getServerTrpcCaller } from "@/trpc/server";
 
 type SearchParams = Record<string, string | string[] | undefined>;
-
 function canonicalTransactionsUrl(pathname: string, month: string): string {
   if (month === "all") {
     return pathname;

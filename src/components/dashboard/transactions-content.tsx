@@ -10,16 +10,19 @@ import {
 } from "@tanstack/react-table";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { inferRouterOutputs } from "@trpc/server";
 import { SectionShell } from "@/components/dashboard/section-shell";
 import {
   formatCurrencyCents,
   formatMonthLabel,
   normalizeMonthKey,
+  resolveErrorMessage,
   type TransactionTab,
 } from "@/components/dashboard/dashboard-shared";
 import type { AppRouter } from "@/server/api/routers/_app";
+import { trpc } from "@/trpc/react";
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
 type TransactionsView = RouterOutputs["accounts"]["transactionsView"];
@@ -29,6 +32,62 @@ type TransactionsContentProps = {
   transactionTab: TransactionTab;
   view: TransactionsView;
 };
+
+type EditableTransactionDraft = {
+  accountId: number;
+  accountName: string;
+  transactionId: string;
+  bookingDate: string;
+  amount: string;
+  direction: "in" | "out";
+  currency: string;
+  description: string;
+  categoryHint: string;
+  counterparty: string;
+  reference: string;
+};
+
+const BOOKING_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const AMOUNT_PATTERN = /^\d+(?:[.,]\d{1,2})?$/;
+
+function getCategoryLabel(row: TransactionRow): string {
+  return row.transaction.categoryHint ?? "Uncategorized";
+}
+
+function centsToAmountInput(amountCents: number): string {
+  return (Math.abs(amountCents) / 100).toFixed(2);
+}
+
+function amountInputToCents(value: string): number | null {
+  const normalized = value.trim();
+  if (!AMOUNT_PATTERN.test(normalized)) {
+    return null;
+  }
+
+  const parsed = Number.parseFloat(normalized.replace(",", "."));
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  const cents = Math.round(parsed * 100);
+  return cents > 0 ? cents : null;
+}
+
+function toEditableTransactionDraft(row: TransactionRow): EditableTransactionDraft {
+  return {
+    accountId: row.accountId,
+    accountName: row.accountName,
+    transactionId: row.transaction.id,
+    bookingDate: row.transaction.bookingDate,
+    amount: centsToAmountInput(row.transaction.amountCents),
+    direction: row.transaction.direction,
+    currency: row.transaction.currency,
+    description: row.transaction.description,
+    categoryHint: row.transaction.categoryHint ?? "",
+    counterparty: row.transaction.counterparty ?? "",
+    reference: row.transaction.reference ?? "",
+  };
+}
 
 function transactionsSubTabPath(tab: TransactionTab): string {
   if (tab === "aggregated") {
@@ -41,7 +100,248 @@ function transactionsSubTabPath(tab: TransactionTab): string {
 export function TransactionsContent({ transactionTab, view }: TransactionsContentProps) {
   const router = useRouter();
   const pathname = usePathname();
+  const [isMounted, setIsMounted] = useState(false);
   const [sorting, setSorting] = useState<SortingState>([]);
+  const [descriptionSearchTerm, setDescriptionSearchTerm] = useState("");
+  const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [accountFilterOpen, setAccountFilterOpen] = useState(false);
+  const [categoryFilterOpen, setCategoryFilterOpen] = useState(false);
+  const [editingTransaction, setEditingTransaction] = useState<EditableTransactionDraft | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  const accountFilterRef = useRef<HTMLDivElement | null>(null);
+  const categoryFilterRef = useRef<HTMLDivElement | null>(null);
+  const updateTransactionMutation = trpc.accounts.updateTransaction.useMutation();
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!editingTransaction) {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !updateTransactionMutation.isPending) {
+        event.preventDefault();
+        setEditingTransaction(null);
+        setEditError(null);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [editingTransaction, updateTransactionMutation.isPending]);
+
+  useEffect(() => {
+    if (!isMounted || !editingTransaction) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [editingTransaction, isMounted]);
+
+  useEffect(() => {
+    if (!accountFilterOpen && !categoryFilterOpen) {
+      return;
+    }
+
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (target && accountFilterRef.current && !accountFilterRef.current.contains(target)) {
+        setAccountFilterOpen(false);
+      }
+      if (target && categoryFilterRef.current && !categoryFilterRef.current.contains(target)) {
+        setCategoryFilterOpen(false);
+      }
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAccountFilterOpen(false);
+        setCategoryFilterOpen(false);
+      }
+    };
+
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [accountFilterOpen, categoryFilterOpen]);
+
+  function openEditModal(row: TransactionRow): void {
+    setEditError(null);
+    setEditingTransaction(toEditableTransactionDraft(row));
+  }
+
+  function closeEditModal(): void {
+    if (updateTransactionMutation.isPending) {
+      return;
+    }
+
+    setEditingTransaction(null);
+    setEditError(null);
+  }
+
+  function updateEditingField<Key extends keyof EditableTransactionDraft>(
+    key: Key,
+    value: EditableTransactionDraft[Key]
+  ): void {
+    setEditingTransaction((current) => {
+      if (!current) {
+        return null;
+      }
+
+      return {
+        ...current,
+        [key]: value,
+      };
+    });
+  }
+
+  function toggleSelectedAccount(accountName: string): void {
+    setSelectedAccounts((current) =>
+      current.includes(accountName)
+        ? current.filter((value) => value !== accountName)
+        : [...current, accountName]
+    );
+  }
+
+  function toggleSelectedCategory(category: string): void {
+    setSelectedCategories((current) =>
+      current.includes(category) ? current.filter((value) => value !== category) : [...current, category]
+    );
+  }
+
+  function removeSelectedAccount(accountName: string): void {
+    setSelectedAccounts((current) => current.filter((value) => value !== accountName));
+  }
+
+  function removeSelectedCategory(category: string): void {
+    setSelectedCategories((current) => current.filter((value) => value !== category));
+  }
+
+  function clearAllClientFilters(): void {
+    setDescriptionSearchTerm("");
+    setSelectedAccounts([]);
+    setSelectedCategories([]);
+    setAccountFilterOpen(false);
+    setCategoryFilterOpen(false);
+  }
+
+  async function handleEditSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!editingTransaction) {
+      return;
+    }
+
+    const bookingDate = editingTransaction.bookingDate.trim();
+    const amountCents = amountInputToCents(editingTransaction.amount);
+    const currency = editingTransaction.currency.trim();
+    const description = editingTransaction.description.trim();
+    const categoryHint = editingTransaction.categoryHint.trim();
+    const counterparty = editingTransaction.counterparty.trim();
+    const reference = editingTransaction.reference.trim();
+
+    if (!BOOKING_DATE_PATTERN.test(bookingDate)) {
+      setEditError("Booking date must use YYYY-MM-DD format.");
+      return;
+    }
+
+    if (!amountCents) {
+      setEditError("Amount must be a positive number with up to 2 decimal places.");
+      return;
+    }
+
+    if (currency.length === 0) {
+      setEditError("Currency is required.");
+      return;
+    }
+
+    if (description.length === 0) {
+      setEditError("Description is required.");
+      return;
+    }
+
+    setEditError(null);
+
+    try {
+      await updateTransactionMutation.mutateAsync({
+        accountId: editingTransaction.accountId,
+        transactionId: editingTransaction.transactionId,
+        bookingDate,
+        amountCents,
+        currency,
+        direction: editingTransaction.direction,
+        description,
+        categoryHint: categoryHint.length > 0 ? categoryHint : undefined,
+        counterparty: counterparty.length > 0 ? counterparty : undefined,
+        reference: reference.length > 0 ? reference : undefined,
+      });
+
+      setEditingTransaction(null);
+      router.refresh();
+    } catch (error) {
+      setEditError(resolveErrorMessage(error, "Could not update transaction."));
+    }
+  }
+
+  const accountOptions = useMemo(() => {
+    return Array.from(new Set(view.transactions.map((row) => row.accountName))).sort((a, b) =>
+      a.localeCompare(b)
+    );
+  }, [view.transactions]);
+  const accountColorByName = useMemo(() => {
+    const colors = new Map<string, string>();
+
+    view.transactions.forEach((row) => {
+      if (!colors.has(row.accountName)) {
+        colors.set(row.accountName, row.accountColor);
+      }
+    });
+
+    return colors;
+  }, [view.transactions]);
+
+  const categoryOptions = useMemo(() => {
+    return Array.from(new Set(view.transactions.map((row) => getCategoryLabel(row)))).sort((a, b) =>
+      a.localeCompare(b)
+    );
+  }, [view.transactions]);
+
+  const filteredTransactions = useMemo(() => {
+    const normalizedSearchTerm = descriptionSearchTerm.trim().toLocaleLowerCase("en-US");
+
+    return view.transactions.filter((row) => {
+      if (
+        normalizedSearchTerm.length > 0 &&
+        !row.transaction.description.toLocaleLowerCase("en-US").includes(normalizedSearchTerm)
+      ) {
+        return false;
+      }
+
+      if (selectedAccounts.length > 0 && !selectedAccounts.includes(row.accountName)) {
+        return false;
+      }
+
+      const categoryLabel = getCategoryLabel(row);
+      if (selectedCategories.length > 0 && !selectedCategories.includes(categoryLabel)) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [descriptionSearchTerm, selectedAccounts, selectedCategories, view.transactions]);
+
   const columns = useMemo<ColumnDef<TransactionRow>[]>(
     () => [
       {
@@ -104,7 +404,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
   // TanStack table exposes mutable APIs that React Compiler's compatibility lint does not support.
   // eslint-disable-next-line react-hooks/incompatible-library
   const table = useReactTable({
-    data: view.transactions,
+    data: filteredTransactions,
     columns,
     state: {
       sorting,
@@ -114,7 +414,6 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
     getSortedRowModel: getSortedRowModel(),
     getRowId: (row) => `${row.accountId}-${row.transaction.id}`,
   });
-
   const monthQuery = view.selectedMonth === "all" ? "" : `?month=${encodeURIComponent(view.selectedMonth)}`;
   const recentHref = `${transactionsSubTabPath("recent")}${monthQuery}`;
   const aggregatedHref = `${transactionsSubTabPath("aggregated")}${monthQuery}`;
@@ -130,7 +429,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
           </div>
         }
       >
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="mb-4 flex flex-wrap items-start gap-3">
           <div className="inline-flex rounded-full border border-ink-soft/15 bg-surface p-1">
             <Link
               href={recentHref}
@@ -156,26 +455,210 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
             </Link>
           </div>
 
-          <label className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
-            Month
-            <select
-              value={view.selectedMonth}
-              onChange={(event) => {
-                const month = normalizeMonthKey(event.target.value);
-                const query = month === "all" ? "" : `?month=${encodeURIComponent(month)}`;
-                const nextUrl = query ? `${pathname}${query}` : pathname;
-                router.replace(nextUrl, { scroll: false });
-              }}
-              className="rounded-full border border-ink-soft/20 bg-surface px-3 py-1.5 text-xs text-foreground outline-none focus:border-accent"
-            >
-              <option value="all">All Months</option>
-              {view.monthOptions.map((month) => (
-                <option key={month} value={month}>
-                  {formatMonthLabel(month)}
-                </option>
+          <div className="w-full basis-full rounded-2xl border border-ink-soft/15 bg-surface/80 p-3">
+            <div className="grid gap-3 lg:grid-cols-[minmax(220px,1.2fr)_minmax(190px,1fr)_minmax(190px,1fr)_auto] lg:items-end">
+              <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                Description Search
+                <input
+                  type="text"
+                  value={descriptionSearchTerm}
+                  onChange={(event) => {
+                    setDescriptionSearchTerm(event.target.value);
+                  }}
+                  placeholder="Contains text..."
+                  className="rounded-full border border-ink-soft/20 bg-surface px-3 py-2 text-xs text-foreground outline-none focus:border-accent"
+                />
+              </label>
+
+              <div className="relative" ref={accountFilterRef}>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">Accounts</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAccountFilterOpen((current) => !current);
+                    setCategoryFilterOpen(false);
+                  }}
+                  className="flex w-full items-center justify-between rounded-full border border-ink-soft/20 bg-surface px-3 py-2 text-xs text-foreground transition hover:border-ink-soft/35"
+                >
+                  <span className="truncate">
+                    {selectedAccounts.length === 0 ? "All accounts" : `${selectedAccounts.length} selected`}
+                  </span>
+                  <span className="text-muted">{accountFilterOpen ? "▴" : "▾"}</span>
+                </button>
+                {accountFilterOpen ? (
+                  <div className="absolute z-30 mt-2 w-full rounded-xl border border-ink-soft/20 bg-surface p-2 shadow-[0_20px_40px_-28px_rgba(22,34,43,0.55)]">
+                    <div className="mb-2 flex items-center justify-between px-1">
+                      <span className="text-[11px] uppercase tracking-[0.1em] text-muted">
+                        {selectedAccounts.length} selected
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedAccounts([]);
+                        }}
+                        className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted hover:text-foreground"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <ul className="max-h-44 space-y-1 overflow-y-auto pr-1">
+                      {accountOptions.map((accountName) => (
+                        <li key={accountName}>
+                          <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-foreground hover:bg-background/70">
+                            <input
+                              type="checkbox"
+                              checked={selectedAccounts.includes(accountName)}
+                              onChange={() => {
+                                toggleSelectedAccount(accountName);
+                              }}
+                              className="h-3.5 w-3.5 rounded border-ink-soft/30"
+                            />
+                            <span
+                              className="inline-flex min-w-0 items-center gap-2 rounded-full border border-ink-soft/20 px-2.5 py-1 font-semibold"
+                              style={{ color: accountColorByName.get(accountName) }}
+                            >
+                              <span
+                                className="inline-block h-2.5 w-2.5 rounded-full"
+                                style={{ backgroundColor: accountColorByName.get(accountName) }}
+                                aria-hidden
+                              />
+                              <span className="truncate">{accountName}</span>
+                            </span>
+                          </label>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="relative" ref={categoryFilterRef}>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">Categories</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCategoryFilterOpen((current) => !current);
+                    setAccountFilterOpen(false);
+                  }}
+                  className="flex w-full items-center justify-between rounded-full border border-ink-soft/20 bg-surface px-3 py-2 text-xs text-foreground transition hover:border-ink-soft/35"
+                >
+                  <span className="truncate">
+                    {selectedCategories.length === 0 ? "All categories" : `${selectedCategories.length} selected`}
+                  </span>
+                  <span className="text-muted">{categoryFilterOpen ? "▴" : "▾"}</span>
+                </button>
+                {categoryFilterOpen ? (
+                  <div className="absolute z-30 mt-2 w-full rounded-xl border border-ink-soft/20 bg-surface p-2 shadow-[0_20px_40px_-28px_rgba(22,34,43,0.55)]">
+                    <div className="mb-2 flex items-center justify-between px-1">
+                      <span className="text-[11px] uppercase tracking-[0.1em] text-muted">
+                        {selectedCategories.length} selected
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedCategories([]);
+                        }}
+                        className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted hover:text-foreground"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <ul className="max-h-44 space-y-1 overflow-y-auto pr-1">
+                      {categoryOptions.map((category) => (
+                        <li key={category}>
+                          <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-foreground hover:bg-background/70">
+                            <input
+                              type="checkbox"
+                              checked={selectedCategories.includes(category)}
+                              onChange={() => {
+                                toggleSelectedCategory(category);
+                              }}
+                              className="h-3.5 w-3.5 rounded border-ink-soft/30"
+                            />
+                            <span className="truncate">{category}</span>
+                          </label>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="flex items-end">
+                <button
+                  type="button"
+                  onClick={clearAllClientFilters}
+                  disabled={
+                    descriptionSearchTerm.trim().length === 0 &&
+                    selectedAccounts.length === 0 &&
+                    selectedCategories.length === 0
+                  }
+                  className="rounded-full border border-ink-soft/20 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                Month
+                <select
+                  value={view.selectedMonth}
+                  onChange={(event) => {
+                    const month = normalizeMonthKey(event.target.value);
+                    const query = month === "all" ? "" : `?month=${encodeURIComponent(month)}`;
+                    const nextUrl = query ? `${pathname}${query}` : pathname;
+                    router.replace(nextUrl, { scroll: false });
+                  }}
+                  className="rounded-full border border-ink-soft/20 bg-surface px-3 py-1.5 text-xs text-foreground outline-none focus:border-accent"
+                >
+                  <option value="all">All Months</option>
+                  {view.monthOptions.map((month) => (
+                    <option key={month} value={month}>
+                      {formatMonthLabel(month)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {selectedAccounts.map((accountName) => (
+                <button
+                  key={`account-${accountName}`}
+                  type="button"
+                  onClick={() => {
+                    removeSelectedAccount(accountName);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-full border border-ink-soft/20 bg-surface px-2.5 py-1 text-xs font-semibold transition hover:border-ink-soft/35"
+                  style={{ color: accountColorByName.get(accountName) }}
+                  title="Remove account filter"
+                >
+                  <span
+                    className="inline-block h-2.5 w-2.5 rounded-full"
+                    style={{ backgroundColor: accountColorByName.get(accountName) }}
+                    aria-hidden
+                  />
+                  {accountName}
+                  <span className="text-muted">x</span>
+                </button>
               ))}
-            </select>
-          </label>
+              {selectedCategories.map((category) => (
+                <button
+                  key={`category-${category}`}
+                  type="button"
+                  onClick={() => {
+                    removeSelectedCategory(category);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-full border border-ink-soft/20 bg-surface px-3 py-1 text-xs font-semibold text-foreground transition hover:border-ink-soft/35"
+                  title="Remove category filter"
+                >
+                  <span className="text-muted">Category</span>
+                  {category}
+                  <span className="text-muted">x</span>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <div className="overflow-x-auto">
@@ -225,7 +708,22 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
               ) : (
                 table.getRowModel().rows.map((row) => {
                   return (
-                    <tr key={row.id} className="rounded-2xl bg-surface">
+                    <tr
+                      key={row.id}
+                      className="rounded-2xl bg-surface transition hover:bg-surface/70"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        openEditModal(row.original);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          openEditModal(row.original);
+                        }
+                      }}
+                      aria-label={`Edit transaction ${row.original.transaction.description}`}
+                    >
                       {row.getVisibleCells().map((cell) => {
                         const isDescription = cell.column.id === "description";
                         const isCategory = cell.column.id === "category";
@@ -245,7 +743,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                               isDate && "border-y font-mono text-xs text-muted",
                               isAmount &&
                                 `rounded-r-xl border border-l-0 text-right font-mono text-sm ${
-                                  isIncome ? "text-positive" : "text-foreground"
+                                  isIncome ? "text-positive" : "text-danger"
                                 }`,
                             ]
                               .filter(Boolean)
@@ -262,6 +760,176 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
             </tbody>
           </table>
         </div>
+
+        {isMounted && editingTransaction
+          ? createPortal(
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 px-4 py-6"
+                onClick={closeEditModal}
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="transaction-edit-title"
+                  className="w-full max-w-2xl rounded-2xl border border-ink-soft/20 bg-surface p-5 shadow-[0_24px_90px_-40px_rgba(20,34,43,0.7)]"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 id="transaction-edit-title" className="text-base font-semibold text-foreground">
+                        Edit Transaction
+                      </h3>
+                      <p className="mt-1 text-xs text-muted">
+                        {editingTransaction.accountName} · {editingTransaction.transactionId}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={closeEditModal}
+                      disabled={updateTransactionMutation.isPending}
+                      className="rounded-full border border-ink-soft/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <form className="mt-5 space-y-4" onSubmit={(event) => void handleEditSubmit(event)}>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Booking Date
+                        <input
+                          type="date"
+                          value={editingTransaction.bookingDate}
+                          onChange={(event) => {
+                            updateEditingField("bookingDate", event.target.value);
+                          }}
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Amount
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={editingTransaction.amount}
+                          onChange={(event) => {
+                            updateEditingField("amount", event.target.value);
+                          }}
+                          placeholder="0.00"
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Direction
+                        <select
+                          value={editingTransaction.direction}
+                          onChange={(event) => {
+                            updateEditingField("direction", event.target.value as "in" | "out");
+                          }}
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        >
+                          <option value="in">Inflow</option>
+                          <option value="out">Outflow</option>
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Currency
+                        <input
+                          type="text"
+                          value={editingTransaction.currency}
+                          onChange={(event) => {
+                            updateEditingField("currency", event.target.value);
+                          }}
+                          maxLength={16}
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                    </div>
+
+                    <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                      Description
+                      <input
+                        type="text"
+                        value={editingTransaction.description}
+                        onChange={(event) => {
+                          updateEditingField("description", event.target.value);
+                        }}
+                        maxLength={500}
+                        className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                      />
+                    </label>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Category
+                        <input
+                          type="text"
+                          value={editingTransaction.categoryHint}
+                          onChange={(event) => {
+                            updateEditingField("categoryHint", event.target.value);
+                          }}
+                          maxLength={120}
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Counterparty
+                        <input
+                          type="text"
+                          value={editingTransaction.counterparty}
+                          onChange={(event) => {
+                            updateEditingField("counterparty", event.target.value);
+                          }}
+                          maxLength={300}
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                    </div>
+
+                    <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                      Reference
+                      <input
+                        type="text"
+                        value={editingTransaction.reference}
+                        onChange={(event) => {
+                          updateEditingField("reference", event.target.value);
+                        }}
+                        maxLength={300}
+                        className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                      />
+                    </label>
+
+                    {editError && (
+                      <p className="rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                        {editError}
+                      </p>
+                    )}
+
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={closeEditModal}
+                        disabled={updateTransactionMutation.isPending}
+                        className="rounded-full border border-ink-soft/20 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={updateTransactionMutation.isPending}
+                        className="rounded-full border border-accent/40 bg-accent/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {updateTransactionMutation.isPending ? "Saving..." : "Save Changes"}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>,
+              document.body
+            )
+          : null}
       </SectionShell>
     </div>
   );
