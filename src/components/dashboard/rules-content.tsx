@@ -44,7 +44,7 @@ type AccountChoice = {
 };
 
 const AMOUNT_PATTERN = /^\d+(?:[.,]\d{1,2})?$/;
-const DEFAULT_PRIORITY = 100;
+const DEFAULT_PRIORITY = 50;
 
 function createEmptyDraft(): RuleDraft {
   return {

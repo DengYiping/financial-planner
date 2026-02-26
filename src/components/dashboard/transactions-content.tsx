@@ -78,7 +78,7 @@ type AccountChoice = {
 
 const BOOKING_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const AMOUNT_PATTERN = /^\d+(?:[.,]\d{1,2})?$/;
-const RULE_DEFAULT_PRIORITY = "100";
+const RULE_DEFAULT_PRIORITY = "50";
 
 function getCategoryLabel(row: TransactionRow): string {
   return row.transaction.categoryHint ?? "Uncategorized";
