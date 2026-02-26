@@ -45,3 +45,15 @@ body {
 ::selection {
   background: color-mix(in srgb, var(--accent) 20%, #ffffff);
 }
+
+@keyframes tab-content-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.995);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}

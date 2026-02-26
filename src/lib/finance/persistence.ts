@@ -4,6 +4,8 @@ import type { NormalizedTransaction, StatementProvider } from "@/lib/parsers/typ
 import { accounts, transactions as transactionsTable } from "@/lib/server/db/schema";
 import { ensureFinanceSchema, getFinanceDb } from "@/lib/server/turso";
 
+const MONTH_KEY_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+
 type AccountSummaryRecord = {
   id: number;
   name: string;
@@ -18,6 +20,52 @@ type AccountSummaryRecord = {
 
 export type AccountRecord = AccountSummaryRecord & {
   transactions: NormalizedTransaction[];
+};
+
+export type DashboardTransactionTab = "recent" | "aggregated";
+
+export type DashboardTransactionsViewInput = {
+  month: string;
+  transactionTab: DashboardTransactionTab;
+};
+
+export type DashboardTransactionRow = {
+  accountId: number;
+  accountName: string;
+  accountColor: string;
+  transaction: NormalizedTransaction;
+};
+
+export type DashboardTransactionsView = {
+  monthOptions: string[];
+  selectedMonth: string;
+  importedTransactionCount: number;
+  transactions: DashboardTransactionRow[];
+};
+
+export type DashboardAccountSummaryRow = {
+  accountId: number;
+  accountName: string;
+  accountKind: string;
+  accountCurrency?: string;
+  accountColor: string;
+  currency: string;
+  transactionCount: number;
+  inflowCents: number;
+  outflowCents: number;
+  netCents: number;
+};
+
+export type DashboardSummaryViewInput = {
+  month?: string;
+};
+
+export type DashboardSummaryView = {
+  monthOptions: string[];
+  selectedMonth?: string;
+  accountCount: number;
+  importedTransactionCount: number;
+  rows: DashboardAccountSummaryRow[];
 };
 
 export type CreateAccountInput = {
@@ -164,7 +212,7 @@ async function listTransactionsForAccounts(accountIds: number[]): Promise<Map<nu
       bookingDate: row.bookingDate,
       amountCents: Math.abs(Math.trunc(toNumberValue(row.amountCents))),
       currency: row.currency,
-      direction: row.direction === "out" ? "out" : "in",
+      direction: row.direction === "out" ? ("out" as const) : ("in" as const),
       description: row.description,
       categoryHint: row.categoryHint ?? undefined,
       counterparty: row.counterparty ?? undefined,
@@ -184,6 +232,45 @@ async function listTransactionsForAccounts(accountIds: number[]): Promise<Map<nu
   return transactionsByAccount;
 }
 
+async function listTransactionMonthOptions(): Promise<string[]> {
+  const db = getFinanceDb();
+  const monthExpr = sql<string>`substr(${transactionsTable.bookingDate}, 1, 7)`;
+
+  const rows = await db
+    .select({
+      month: monthExpr,
+    })
+    .from(transactionsTable)
+    .groupBy(monthExpr)
+    .orderBy(desc(monthExpr));
+
+  return rows
+    .map((row) => row.month)
+    .filter((month): month is string => typeof month === "string" && MONTH_KEY_PATTERN.test(month));
+}
+
+async function countImportedTransactions(): Promise<number> {
+  const db = getFinanceDb();
+  const rows = await db
+    .select({
+      count: sql<number>`count(*)`,
+    })
+    .from(transactionsTable);
+
+  return Math.max(0, Math.trunc(toNumberValue(rows[0]?.count)));
+}
+
+async function countAccounts(): Promise<number> {
+  const db = getFinanceDb();
+  const rows = await db
+    .select({
+      count: sql<number>`count(*)`,
+    })
+    .from(accounts);
+
+  return Math.max(0, Math.trunc(toNumberValue(rows[0]?.count)));
+}
+
 export async function listAccounts(): Promise<AccountRecord[]> {
   const summaries = await listAccountSummaries();
   const transactionsByAccount = await listTransactionsForAccounts(summaries.map((summary) => summary.id));
@@ -197,6 +284,194 @@ export async function listAccounts(): Promise<AccountRecord[]> {
       transactionCount: Math.max(summary.transactionCount, transactions.length),
     };
   });
+}
+
+export async function getDashboardTransactionsView(
+  input: DashboardTransactionsViewInput
+): Promise<DashboardTransactionsView> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+
+  const monthOptions = await listTransactionMonthOptions();
+  const selectedMonth =
+    input.month !== "all" && monthOptions.includes(input.month) ? input.month : "all";
+
+  const monthWhereClause =
+    selectedMonth === "all"
+      ? undefined
+      : sql`substr(${transactionsTable.bookingDate}, 1, 7) = ${selectedMonth}`;
+
+  const orderByColumns =
+    input.transactionTab === "aggregated"
+      ? [asc(transactionsTable.bookingDate), asc(transactionsTable.sourceId)]
+      : [desc(transactionsTable.bookingDate), asc(transactionsTable.sourceId)];
+
+  const transactionSelection = {
+    accountId: accounts.id,
+    accountName: accounts.name,
+    accountColor: accounts.color,
+    sourceId: transactionsTable.sourceId,
+    provider: transactionsTable.provider,
+    bookingDate: transactionsTable.bookingDate,
+    amountCents: transactionsTable.amountCents,
+    currency: transactionsTable.currency,
+    direction: transactionsTable.direction,
+    description: transactionsTable.description,
+    categoryHint: transactionsTable.categoryHint,
+    counterparty: transactionsTable.counterparty,
+    reference: transactionsTable.reference,
+    rawJson: transactionsTable.rawJson,
+  };
+
+  const rows = monthWhereClause
+    ? input.transactionTab === "recent"
+      ? await db
+          .select(transactionSelection)
+          .from(transactionsTable)
+          .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
+          .where(monthWhereClause)
+          .orderBy(...orderByColumns)
+          .limit(25)
+      : await db
+          .select(transactionSelection)
+          .from(transactionsTable)
+          .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
+          .where(monthWhereClause)
+          .orderBy(...orderByColumns)
+    : input.transactionTab === "recent"
+      ? await db
+          .select(transactionSelection)
+          .from(transactionsTable)
+          .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
+          .orderBy(...orderByColumns)
+          .limit(25)
+      : await db
+          .select(transactionSelection)
+          .from(transactionsTable)
+          .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
+          .orderBy(...orderByColumns);
+
+  const importedTransactionCount = await countImportedTransactions();
+  const transactions: DashboardTransactionRow[] = rows.map((row) => {
+    const transaction: NormalizedTransaction = {
+      id: row.sourceId,
+      provider: row.provider,
+      bookingDate: row.bookingDate,
+      amountCents: Math.abs(Math.trunc(toNumberValue(row.amountCents))),
+      currency: row.currency,
+      direction: row.direction === "out" ? "out" : "in",
+      description: row.description,
+      categoryHint: row.categoryHint ?? undefined,
+      counterparty: row.counterparty ?? undefined,
+      reference: row.reference ?? undefined,
+      raw: parseRawJson(row.rawJson),
+    };
+
+    return {
+      accountId: row.accountId,
+      accountName: row.accountName,
+      accountColor: row.accountColor,
+      transaction,
+    };
+  });
+
+  return {
+    monthOptions,
+    selectedMonth,
+    importedTransactionCount,
+    transactions,
+  };
+}
+
+export async function getDashboardSummaryView(input: DashboardSummaryViewInput): Promise<DashboardSummaryView> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+
+  const monthOptions = await listTransactionMonthOptions();
+  const selectedMonth =
+    monthOptions.length === 0 ? "" : input.month && monthOptions.includes(input.month) ? input.month : monthOptions[0];
+
+  const [importedTransactionCount, accountCount] = await Promise.all([countImportedTransactions(), countAccounts()]);
+  if (!selectedMonth) {
+    return {
+      monthOptions,
+      selectedMonth: undefined,
+      accountCount,
+      importedTransactionCount,
+      rows: [],
+    };
+  }
+
+  const fallbackCurrencyRows = await db
+    .select({
+      accountId: transactionsTable.accountId,
+      fallbackCurrency: sql<string | null>`max(${transactionsTable.currency})`,
+    })
+    .from(transactionsTable)
+    .groupBy(transactionsTable.accountId);
+
+  const fallbackCurrencyByAccountId = new Map<number, string>();
+  fallbackCurrencyRows.forEach((row) => {
+    if (typeof row.fallbackCurrency === "string" && row.fallbackCurrency.length > 0) {
+      fallbackCurrencyByAccountId.set(row.accountId, row.fallbackCurrency);
+    }
+  });
+
+  const summaryRows = await db
+    .select({
+      accountId: accounts.id,
+      accountName: accounts.name,
+      accountKind: accounts.kind,
+      accountCurrency: accounts.currency,
+      accountColor: accounts.color,
+      createdAt: accounts.createdAt,
+      monthCurrency: sql<string | null>`max(${transactionsTable.currency})`,
+      transactionCount: sql<number>`count(${transactionsTable.id})`,
+      inflowCents:
+        sql<number>`coalesce(sum(case when ${transactionsTable.direction} = 'in' then ${transactionsTable.amountCents} else 0 end), 0)`,
+      outflowCents:
+        sql<number>`coalesce(sum(case when ${transactionsTable.direction} = 'out' then ${transactionsTable.amountCents} else 0 end), 0)`,
+    })
+    .from(accounts)
+    .leftJoin(
+      transactionsTable,
+      and(
+        eq(transactionsTable.accountId, accounts.id),
+        sql`substr(${transactionsTable.bookingDate}, 1, 7) = ${selectedMonth}`
+      )
+    )
+    .groupBy(accounts.id, accounts.name, accounts.kind, accounts.currency, accounts.color, accounts.createdAt)
+    .orderBy(asc(accounts.createdAt));
+
+  const rows: DashboardAccountSummaryRow[] = summaryRows.map((row) => {
+    const inflowCents = Math.max(0, Math.trunc(toNumberValue(row.inflowCents)));
+    const outflowCents = Math.max(0, Math.trunc(toNumberValue(row.outflowCents)));
+    const accountCurrency =
+      row.accountCurrency && row.accountCurrency.length > 0 ? row.accountCurrency : undefined;
+    const currency =
+      accountCurrency ?? row.monthCurrency ?? fallbackCurrencyByAccountId.get(row.accountId) ?? "EUR";
+
+    return {
+      accountId: row.accountId,
+      accountName: row.accountName,
+      accountKind: row.accountKind,
+      accountCurrency,
+      accountColor: row.accountColor,
+      currency,
+      transactionCount: Math.max(0, Math.trunc(toNumberValue(row.transactionCount))),
+      inflowCents,
+      outflowCents,
+      netCents: inflowCents - outflowCents,
+    };
+  });
+
+  return {
+    monthOptions,
+    selectedMonth,
+    accountCount,
+    importedTransactionCount,
+    rows,
+  };
 }
 
 export async function getAccountById(accountId: number): Promise<AccountRecord | null> {

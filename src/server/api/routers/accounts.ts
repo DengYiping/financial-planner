@@ -3,6 +3,8 @@ import { z } from "zod";
 import {
   createAccount,
   deleteAccountById,
+  getDashboardSummaryView,
+  getDashboardTransactionsView,
   getAccountById,
   importTransactionsForAccount,
   isUniqueConstraintError,
@@ -25,7 +27,11 @@ const accountCurrencySchema = z.enum(ACCOUNT_CURRENCY_VALUES);
 const statementProviderSchema = z.enum(["aib", "revolut"]);
 const accountIdSchema = z.number().int().positive();
 const bookingDateRegex = /^\d{4}-\d{2}-\d{2}$/;
+const monthKeyRegex = /^\d{4}-(0[1-9]|1[0-2])$/;
 const hexColorRegex = /^#(?:[0-9a-fA-F]{3}){1,2}$/;
+const transactionTabSchema = z.enum(["recent", "aggregated"]);
+const monthKeySchema = z.string().regex(monthKeyRegex);
+const monthFilterSchema = z.union([z.literal("all"), monthKeySchema]);
 
 const normalizedTransactionSchema = z.object({
   id: z.string().trim().min(1).max(160),
@@ -50,6 +56,41 @@ const persistedAccountSchema = z.object({
   color: z.string(),
   transactionCount: z.number().int().nonnegative(),
   transactions: z.array(normalizedTransactionSchema),
+});
+
+const transactionsViewRowSchema = z.object({
+  accountId: z.number().int().positive(),
+  accountName: z.string(),
+  accountColor: z.string(),
+  transaction: normalizedTransactionSchema,
+});
+
+const transactionsViewSchema = z.object({
+  monthOptions: z.array(monthKeySchema),
+  selectedMonth: monthFilterSchema,
+  importedTransactionCount: z.number().int().nonnegative(),
+  transactions: z.array(transactionsViewRowSchema),
+});
+
+const summaryRowSchema = z.object({
+  accountId: z.number().int().positive(),
+  accountName: z.string(),
+  accountKind: accountKindSchema,
+  accountCurrency: accountCurrencySchema.optional(),
+  accountColor: z.string(),
+  currency: z.string(),
+  transactionCount: z.number().int().nonnegative(),
+  inflowCents: z.number().int().nonnegative(),
+  outflowCents: z.number().int().nonnegative(),
+  netCents: z.number().int(),
+});
+
+const summaryViewSchema = z.object({
+  monthOptions: z.array(monthKeySchema),
+  selectedMonth: monthKeySchema.optional(),
+  accountCount: z.number().int().nonnegative(),
+  importedTransactionCount: z.number().int().nonnegative(),
+  rows: z.array(summaryRowSchema),
 });
 
 type AccountKind = z.infer<typeof accountKindSchema>;
@@ -192,6 +233,84 @@ export const accountsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Failed to delete account.",
+        });
+      }
+    }),
+
+  transactionsView: publicProcedure
+    .input(
+      z.object({
+        month: monthFilterSchema.optional().default("all"),
+        transactionTab: transactionTabSchema.optional().default("recent"),
+      })
+    )
+    .output(transactionsViewSchema)
+    .query(async ({ input }) => {
+      try {
+        const view = await getDashboardTransactionsView({
+          month: input.month,
+          transactionTab: input.transactionTab,
+        });
+
+        return view;
+      } catch {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to load filtered transactions.",
+        });
+      }
+    }),
+
+  summaryView: publicProcedure
+    .input(
+      z.object({
+        month: monthKeySchema.optional(),
+      })
+    )
+    .output(summaryViewSchema)
+    .query(async ({ input }) => {
+      try {
+        const summary = await getDashboardSummaryView({
+          month: input.month,
+        });
+
+        const rows = summary.rows.flatMap((row) => {
+          const kindResult = accountKindSchema.safeParse(row.accountKind);
+          if (!kindResult.success) {
+            return [];
+          }
+
+          const accountCurrencyResult = row.accountCurrency
+            ? accountCurrencySchema.safeParse(row.accountCurrency)
+            : null;
+
+          return [
+            {
+              accountId: row.accountId,
+              accountName: row.accountName,
+              accountKind: kindResult.data,
+              accountCurrency: accountCurrencyResult?.success ? accountCurrencyResult.data : undefined,
+              accountColor: row.accountColor,
+              currency: row.currency,
+              transactionCount: row.transactionCount,
+              inflowCents: row.inflowCents,
+              outflowCents: row.outflowCents,
+              netCents: row.netCents,
+            },
+          ];
+        });
+
+        return {
+          monthOptions: summary.monthOptions,
+          selectedMonth: summary.selectedMonth,
+          accountCount: summary.accountCount,
+          importedTransactionCount: summary.importedTransactionCount,
+          rows,
+        };
+      } catch {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to load account summary view.",
         });
       }
     }),
