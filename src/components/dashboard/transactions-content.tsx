@@ -27,6 +27,7 @@ import { trpc } from "@/trpc/react";
 type RouterOutputs = inferRouterOutputs<AppRouter>;
 type TransactionsView = RouterOutputs["accounts"]["transactionsView"];
 type TransactionRow = TransactionsView["transactions"][number];
+type PersistedAccount = RouterOutputs["accounts"]["list"][number];
 
 type TransactionsContentProps = {
   transactionTab: TransactionTab;
@@ -36,7 +37,7 @@ type TransactionsContentProps = {
 type EditableTransactionDraft = {
   accountId: number;
   accountName: string;
-  transactionId: string;
+  transactionId?: string;
   bookingDate: string;
   amount: string;
   direction: "in" | "out";
@@ -45,6 +46,18 @@ type EditableTransactionDraft = {
   categoryHint: string;
   counterparty: string;
   reference: string;
+};
+
+type TransactionModalState = {
+  mode: "create" | "edit";
+  draft: EditableTransactionDraft;
+};
+
+type AccountChoice = {
+  id: number;
+  name: string;
+  color: string;
+  currency?: string;
 };
 
 const BOOKING_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -89,6 +102,25 @@ function toEditableTransactionDraft(row: TransactionRow): EditableTransactionDra
   };
 }
 
+function toCreateTransactionDraft(account: AccountChoice | undefined, fallbackCurrency: string): EditableTransactionDraft {
+  const now = new Date();
+  const yyyyMmDd = new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+
+  return {
+    accountId: account?.id ?? 0,
+    accountName: account?.name ?? "",
+    transactionId: undefined,
+    bookingDate: yyyyMmDd,
+    amount: "0.00",
+    direction: "out",
+    currency: account?.currency ?? fallbackCurrency,
+    description: "",
+    categoryHint: "",
+    counterparty: "",
+    reference: "",
+  };
+}
+
 function transactionsSubTabPath(tab: TransactionTab): string {
   if (tab === "aggregated") {
     return "/transactions/aggregated";
@@ -107,8 +139,11 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [accountFilterOpen, setAccountFilterOpen] = useState(false);
   const [categoryFilterOpen, setCategoryFilterOpen] = useState(false);
-  const [editingTransaction, setEditingTransaction] = useState<EditableTransactionDraft | null>(null);
+  const [transactionModal, setTransactionModal] = useState<TransactionModalState | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
+  const accountsQuery = trpc.accounts.list.useQuery();
+  const createTransactionMutation = trpc.accounts.createTransaction.useMutation();
+  const deleteTransactionMutation = trpc.accounts.deleteTransaction.useMutation();
   const accountFilterRef = useRef<HTMLDivElement | null>(null);
   const categoryFilterRef = useRef<HTMLDivElement | null>(null);
   const updateTransactionMutation = trpc.accounts.updateTransaction.useMutation();
@@ -118,14 +153,19 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
   }, []);
 
   useEffect(() => {
-    if (!editingTransaction) {
+    if (!transactionModal) {
       return;
     }
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !updateTransactionMutation.isPending) {
+      const isMutating =
+        updateTransactionMutation.isPending ||
+        createTransactionMutation.isPending ||
+        deleteTransactionMutation.isPending;
+
+      if (event.key === "Escape" && !isMutating) {
         event.preventDefault();
-        setEditingTransaction(null);
+        setTransactionModal(null);
         setEditError(null);
       }
     };
@@ -134,10 +174,15 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [editingTransaction, updateTransactionMutation.isPending]);
+  }, [
+    transactionModal,
+    updateTransactionMutation.isPending,
+    createTransactionMutation.isPending,
+    deleteTransactionMutation.isPending,
+  ]);
 
   useEffect(() => {
-    if (!isMounted || !editingTransaction) {
+    if (!isMounted || !transactionModal) {
       return;
     }
 
@@ -146,7 +191,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
     return () => {
       document.body.style.overflow = previousOverflow;
     };
-  }, [editingTransaction, isMounted]);
+  }, [transactionModal, isMounted]);
 
   useEffect(() => {
     if (!accountFilterOpen && !categoryFilterOpen) {
@@ -180,15 +225,22 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
 
   function openEditModal(row: TransactionRow): void {
     setEditError(null);
-    setEditingTransaction(toEditableTransactionDraft(row));
+    setTransactionModal({
+      mode: "edit",
+      draft: toEditableTransactionDraft(row),
+    });
   }
 
   function closeEditModal(): void {
-    if (updateTransactionMutation.isPending) {
+    if (
+      updateTransactionMutation.isPending ||
+      createTransactionMutation.isPending ||
+      deleteTransactionMutation.isPending
+    ) {
       return;
     }
 
-    setEditingTransaction(null);
+    setTransactionModal(null);
     setEditError(null);
   }
 
@@ -196,14 +248,17 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
     key: Key,
     value: EditableTransactionDraft[Key]
   ): void {
-    setEditingTransaction((current) => {
+    setTransactionModal((current) => {
       if (!current) {
         return null;
       }
 
       return {
         ...current,
-        [key]: value,
+        draft: {
+          ...current.draft,
+          [key]: value,
+        },
       };
     });
   }
@@ -238,19 +293,29 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
     setCategoryFilterOpen(false);
   }
 
+  function openCreateModal(): void {
+    const fallbackCurrency = view.transactions[0]?.transaction.currency ?? "EUR";
+    setEditError(null);
+    setTransactionModal({
+      mode: "create",
+      draft: toCreateTransactionDraft(accountChoices[0], fallbackCurrency),
+    });
+  }
+
   async function handleEditSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (!editingTransaction) {
+    if (!transactionModal) {
       return;
     }
 
-    const bookingDate = editingTransaction.bookingDate.trim();
-    const amountCents = amountInputToCents(editingTransaction.amount);
-    const currency = editingTransaction.currency.trim();
-    const description = editingTransaction.description.trim();
-    const categoryHint = editingTransaction.categoryHint.trim();
-    const counterparty = editingTransaction.counterparty.trim();
-    const reference = editingTransaction.reference.trim();
+    const draft = transactionModal.draft;
+    const bookingDate = draft.bookingDate.trim();
+    const amountCents = amountInputToCents(draft.amount);
+    const currency = draft.currency.trim();
+    const description = draft.description.trim();
+    const categoryHint = draft.categoryHint.trim();
+    const counterparty = draft.counterparty.trim();
+    const reference = draft.reference.trim();
 
     if (!BOOKING_DATE_PATTERN.test(bookingDate)) {
       setEditError("Booking date must use YYYY-MM-DD format.");
@@ -272,36 +337,129 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
       return;
     }
 
+    if (draft.accountId <= 0) {
+      setEditError("Please select an account.");
+      return;
+    }
+
     setEditError(null);
 
     try {
-      await updateTransactionMutation.mutateAsync({
-        accountId: editingTransaction.accountId,
-        transactionId: editingTransaction.transactionId,
-        bookingDate,
-        amountCents,
-        currency,
-        direction: editingTransaction.direction,
-        description,
-        categoryHint: categoryHint.length > 0 ? categoryHint : undefined,
-        counterparty: counterparty.length > 0 ? counterparty : undefined,
-        reference: reference.length > 0 ? reference : undefined,
-      });
+      if (transactionModal.mode === "create") {
+        await createTransactionMutation.mutateAsync({
+          accountId: draft.accountId,
+          bookingDate,
+          amountCents,
+          currency,
+          direction: draft.direction,
+          description,
+          categoryHint: categoryHint.length > 0 ? categoryHint : undefined,
+          counterparty: counterparty.length > 0 ? counterparty : undefined,
+          reference: reference.length > 0 ? reference : undefined,
+        });
+      } else {
+        if (!draft.transactionId) {
+          setEditError("Transaction id is missing.");
+          return;
+        }
 
-      setEditingTransaction(null);
+        await updateTransactionMutation.mutateAsync({
+          accountId: draft.accountId,
+          transactionId: draft.transactionId,
+          bookingDate,
+          amountCents,
+          currency,
+          direction: draft.direction,
+          description,
+          categoryHint: categoryHint.length > 0 ? categoryHint : undefined,
+          counterparty: counterparty.length > 0 ? counterparty : undefined,
+          reference: reference.length > 0 ? reference : undefined,
+        });
+      }
+
+      setTransactionModal(null);
       router.refresh();
     } catch (error) {
-      setEditError(resolveErrorMessage(error, "Could not update transaction."));
+      setEditError(
+        resolveErrorMessage(
+          error,
+          transactionModal.mode === "create" ? "Could not create transaction." : "Could not update transaction."
+        )
+      );
     }
   }
 
-  const accountOptions = useMemo(() => {
-    return Array.from(new Set(view.transactions.map((row) => row.accountName))).sort((a, b) =>
-      a.localeCompare(b)
+  async function handleDeleteTransaction(): Promise<void> {
+    if (!transactionModal || transactionModal.mode !== "edit") {
+      return;
+    }
+
+    const draft = transactionModal.draft;
+    if (!draft.transactionId) {
+      setEditError("Transaction id is missing.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete transaction "${draft.description}" from ${draft.accountName}? This action cannot be undone.`
     );
-  }, [view.transactions]);
+    if (!confirmed) {
+      return;
+    }
+
+    setEditError(null);
+
+    try {
+      await deleteTransactionMutation.mutateAsync({
+        accountId: draft.accountId,
+        transactionId: draft.transactionId,
+      });
+      setTransactionModal(null);
+      router.refresh();
+    } catch (error) {
+      setEditError(resolveErrorMessage(error, "Could not delete transaction."));
+    }
+  }
+
+  const accountChoices = useMemo<AccountChoice[]>(() => {
+    if (accountsQuery.data && accountsQuery.data.length > 0) {
+      return [...accountsQuery.data]
+        .map((account: PersistedAccount) => ({
+          id: account.id,
+          name: account.name,
+          color: account.color,
+          currency: account.currency,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    const byId = new Map<number, AccountChoice>();
+    view.transactions.forEach((row) => {
+      if (!byId.has(row.accountId)) {
+        byId.set(row.accountId, {
+          id: row.accountId,
+          name: row.accountName,
+          color: row.accountColor,
+          currency: row.transaction.currency || undefined,
+        });
+      }
+    });
+
+    return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [accountsQuery.data, view.transactions]);
+
+  const accountOptions = useMemo(() => {
+    return accountChoices.map((account) => account.name);
+  }, [accountChoices]);
+
   const accountColorByName = useMemo(() => {
     const colors = new Map<string, string>();
+
+    accountChoices.forEach((account) => {
+      if (!colors.has(account.name)) {
+        colors.set(account.name, account.color);
+      }
+    });
 
     view.transactions.forEach((row) => {
       if (!colors.has(row.accountName)) {
@@ -310,7 +468,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
     });
 
     return colors;
-  }, [view.transactions]);
+  }, [accountChoices, view.transactions]);
 
   const categoryOptions = useMemo(() => {
     return Array.from(new Set(view.transactions.map((row) => getCategoryLabel(row)))).sort((a, b) =>
@@ -414,6 +572,10 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
     getSortedRowModel: getSortedRowModel(),
     getRowId: (row) => `${row.accountId}-${row.transaction.id}`,
   });
+  const isModalMutating =
+    updateTransactionMutation.isPending ||
+    createTransactionMutation.isPending ||
+    deleteTransactionMutation.isPending;
   const monthQuery = view.selectedMonth === "all" ? "" : `?month=${encodeURIComponent(view.selectedMonth)}`;
   const recentHref = `${transactionsSubTabPath("recent")}${monthQuery}`;
   const aggregatedHref = `${transactionsSubTabPath("aggregated")}${monthQuery}`;
@@ -454,6 +616,14 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
               All Accounts Chronological
             </Link>
           </div>
+          <button
+            type="button"
+            onClick={openCreateModal}
+            disabled={accountChoices.length === 0}
+            className="rounded-full border border-accent/35 bg-accent/10 px-3.5 py-2 text-xs font-semibold uppercase tracking-[0.1em] text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-45"
+          >
+            Add Transaction
+          </button>
 
           <div className="w-full basis-full rounded-2xl border border-ink-soft/15 bg-surface/80 p-3">
             <div className="grid gap-3 lg:grid-cols-[minmax(220px,1.2fr)_minmax(190px,1fr)_minmax(190px,1fr)_auto] lg:items-end">
@@ -761,7 +931,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
           </table>
         </div>
 
-        {isMounted && editingTransaction
+        {isMounted && transactionModal
           ? createPortal(
               <div
                 className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 px-4 py-6"
@@ -779,16 +949,18 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <h3 id="transaction-edit-title" className="text-base font-semibold text-foreground">
-                        Edit Transaction
+                        {transactionModal.mode === "create" ? "Add Transaction" : "Edit Transaction"}
                       </h3>
                       <p className="mt-1 text-xs text-muted">
-                        {editingTransaction.accountName} · {editingTransaction.transactionId}
+                        {transactionModal.mode === "create"
+                          ? transactionModal.draft.accountName || "Select an account"
+                          : `${transactionModal.draft.accountName} · ${transactionModal.draft.transactionId}`}
                       </p>
                     </div>
                     <button
                       type="button"
                       onClick={closeEditModal}
-                      disabled={updateTransactionMutation.isPending}
+                      disabled={isModalMutating}
                       className="rounded-full border border-ink-soft/20 px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       Close
@@ -796,12 +968,65 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                   </div>
 
                   <form className="mt-5 space-y-4" onSubmit={(event) => void handleEditSubmit(event)}>
+                    {transactionModal.mode === "create" ? (
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Account
+                        <select
+                          value={String(transactionModal.draft.accountId)}
+                          onChange={(event) => {
+                            const nextAccountId = Number.parseInt(event.target.value, 10);
+                            const nextAccount = accountChoices.find((account) => account.id === nextAccountId);
+                            setTransactionModal((current) => {
+                              if (!current) {
+                                return null;
+                              }
+
+                              return {
+                                ...current,
+                                draft: {
+                                  ...current.draft,
+                                  accountId: nextAccount?.id ?? 0,
+                                  accountName: nextAccount?.name ?? "",
+                                  currency:
+                                    current.mode === "create" && nextAccount?.currency
+                                      ? nextAccount.currency
+                                      : current.draft.currency,
+                                },
+                              };
+                            });
+                          }}
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        >
+                          {accountChoices.length === 0 ? (
+                            <option value="0">No accounts available</option>
+                          ) : (
+                            accountChoices.map((account) => (
+                              <option key={account.id} value={String(account.id)}>
+                                {account.name}
+                              </option>
+                            ))
+                          )}
+                        </select>
+                      </label>
+                    ) : (
+                      <div className="inline-flex items-center gap-2 rounded-full border border-ink-soft/20 px-2.5 py-1 text-xs font-semibold">
+                        <span
+                          className="inline-block h-2.5 w-2.5 rounded-full"
+                          style={{
+                            backgroundColor: accountColorByName.get(transactionModal.draft.accountName),
+                          }}
+                          aria-hidden
+                        />
+                        {transactionModal.draft.accountName}
+                      </div>
+                    )}
+
                     <div className="grid gap-3 sm:grid-cols-2">
                       <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
                         Booking Date
                         <input
                           type="date"
-                          value={editingTransaction.bookingDate}
+                          value={transactionModal.draft.bookingDate}
                           onChange={(event) => {
                             updateEditingField("bookingDate", event.target.value);
                           }}
@@ -813,7 +1038,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                         <input
                           type="text"
                           inputMode="decimal"
-                          value={editingTransaction.amount}
+                          value={transactionModal.draft.amount}
                           onChange={(event) => {
                             updateEditingField("amount", event.target.value);
                           }}
@@ -824,7 +1049,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                       <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
                         Direction
                         <select
-                          value={editingTransaction.direction}
+                          value={transactionModal.draft.direction}
                           onChange={(event) => {
                             updateEditingField("direction", event.target.value as "in" | "out");
                           }}
@@ -838,7 +1063,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                         Currency
                         <input
                           type="text"
-                          value={editingTransaction.currency}
+                          value={transactionModal.draft.currency}
                           onChange={(event) => {
                             updateEditingField("currency", event.target.value);
                           }}
@@ -852,7 +1077,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                       Description
                       <input
                         type="text"
-                        value={editingTransaction.description}
+                        value={transactionModal.draft.description}
                         onChange={(event) => {
                           updateEditingField("description", event.target.value);
                         }}
@@ -866,7 +1091,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                         Category
                         <input
                           type="text"
-                          value={editingTransaction.categoryHint}
+                          value={transactionModal.draft.categoryHint}
                           onChange={(event) => {
                             updateEditingField("categoryHint", event.target.value);
                           }}
@@ -878,7 +1103,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                         Counterparty
                         <input
                           type="text"
-                          value={editingTransaction.counterparty}
+                          value={transactionModal.draft.counterparty}
                           onChange={(event) => {
                             updateEditingField("counterparty", event.target.value);
                           }}
@@ -892,7 +1117,7 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                       Reference
                       <input
                         type="text"
-                        value={editingTransaction.reference}
+                        value={transactionModal.draft.reference}
                         onChange={(event) => {
                           updateEditingField("reference", event.target.value);
                         }}
@@ -907,22 +1132,43 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                       </p>
                     )}
 
-                    <div className="flex items-center justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={closeEditModal}
-                        disabled={updateTransactionMutation.isPending}
-                        className="rounded-full border border-ink-soft/20 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        type="submit"
-                        disabled={updateTransactionMutation.isPending}
-                        className="rounded-full border border-accent/40 bg-accent/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {updateTransactionMutation.isPending ? "Saving..." : "Save Changes"}
-                      </button>
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        {transactionModal.mode === "edit" ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteTransaction()}
+                            disabled={isModalMutating}
+                            className="rounded-full border border-danger/40 bg-danger/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-danger transition hover:bg-danger/20 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {deleteTransactionMutation.isPending ? "Deleting..." : "Delete"}
+                          </button>
+                        ) : null}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={closeEditModal}
+                          disabled={isModalMutating}
+                          className="rounded-full border border-ink-soft/20 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={isModalMutating}
+                          className="rounded-full border border-accent/40 bg-accent/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {transactionModal.mode === "create"
+                            ? createTransactionMutation.isPending
+                              ? "Creating..."
+                              : "Create Transaction"
+                            : updateTransactionMutation.isPending
+                              ? "Saving..."
+                              : "Save Changes"}
+                        </button>
+                      </div>
                     </div>
                   </form>
                 </div>

@@ -1,8 +1,10 @@
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import {
+  createTransactionForAccount,
   createAccount,
   deleteAccountById,
+  deleteTransactionForAccount,
   getDashboardSummaryView,
   getDashboardTransactionsView,
   getAccountById,
@@ -434,6 +436,107 @@ export const accountsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Failed to update transaction.",
+        });
+      }
+    }),
+
+  createTransaction: publicProcedure
+    .input(
+      z.object({
+        accountId: accountIdSchema,
+        bookingDate: z.string().trim().regex(bookingDateRegex, "bookingDate must use YYYY-MM-DD format."),
+        amountCents: z.number().int().positive(),
+        currency: z.string().trim().min(1).max(16),
+        direction: z.enum(["in", "out"]),
+        description: z.string().trim().min(1).max(500),
+        categoryHint: z.string().trim().max(120).nullish(),
+        counterparty: z.string().trim().max(300).nullish(),
+        reference: z.string().trim().max(300).nullish(),
+      })
+    )
+    .output(
+      z.object({
+        accountId: accountIdSchema,
+        transactionId: z.string().trim().min(1).max(160),
+        created: z.literal(true),
+      })
+    )
+    .mutation(async ({ input }) => {
+      try {
+        const account = await getAccountById(input.accountId);
+        if (!account) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Account was not found.",
+          });
+        }
+
+        const result = await createTransactionForAccount(input.accountId, {
+          provider: account.provider,
+          bookingDate: input.bookingDate,
+          amountCents: input.amountCents,
+          currency: input.currency,
+          direction: input.direction,
+          description: input.description,
+          categoryHint: normalizeOptionalText(input.categoryHint),
+          counterparty: normalizeOptionalText(input.counterparty),
+          reference: normalizeOptionalText(input.reference),
+        });
+
+        return {
+          accountId: input.accountId,
+          transactionId: result.transactionId,
+          created: true as const,
+        };
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to create transaction.",
+        });
+      }
+    }),
+
+  deleteTransaction: publicProcedure
+    .input(
+      z.object({
+        accountId: accountIdSchema,
+        transactionId: z.string().trim().min(1).max(160),
+      })
+    )
+    .output(
+      z.object({
+        accountId: accountIdSchema,
+        transactionId: z.string().trim().min(1).max(160),
+        deleted: z.literal(true),
+      })
+    )
+    .mutation(async ({ input }) => {
+      try {
+        const deleted = await deleteTransactionForAccount(input.accountId, input.transactionId);
+        if (!deleted) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Transaction was not found for this account.",
+          });
+        }
+
+        return {
+          accountId: input.accountId,
+          transactionId: input.transactionId,
+          deleted: true as const,
+        };
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to delete transaction.",
         });
       }
     }),

@@ -83,6 +83,22 @@ export type ImportTransactionsResult = {
   skippedCount: number;
 };
 
+export type CreateTransactionForAccountInput = {
+  provider: StatementProvider;
+  bookingDate: string;
+  amountCents: number;
+  currency: string;
+  direction: "in" | "out";
+  description: string;
+  categoryHint?: string;
+  counterparty?: string;
+  reference?: string;
+};
+
+export type CreateTransactionForAccountResult = {
+  transactionId: string;
+};
+
 export type UpdateTransactionForAccountInput = {
   bookingDate: string;
   amountCents: number;
@@ -600,6 +616,72 @@ export async function importTransactionsForAccount(
     insertedCount,
     skippedCount: transactions.length - insertedCount,
   };
+}
+
+export async function createTransactionForAccount(
+  accountId: number,
+  input: CreateTransactionForAccountInput
+): Promise<CreateTransactionForAccountResult> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const sourceId = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${attempt}`;
+
+    try {
+      await db.insert(transactionsTable).values({
+        accountId,
+        sourceId,
+        provider: input.provider,
+        bookingDate: input.bookingDate,
+        amountCents: Math.abs(Math.trunc(input.amountCents)),
+        currency: input.currency,
+        direction: input.direction,
+        description: input.description,
+        categoryHint: input.categoryHint ?? null,
+        counterparty: input.counterparty ?? null,
+        reference: input.reference ?? null,
+        rawJson: JSON.stringify({
+          source: "manual",
+        }),
+      });
+
+      return {
+        transactionId: sourceId,
+      };
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw new Error("Failed to generate a unique transaction id for manual transaction.");
+}
+
+export async function deleteTransactionForAccount(accountId: number, transactionId: string): Promise<boolean> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+
+  const existing = await db
+    .select({
+      id: transactionsTable.id,
+    })
+    .from(transactionsTable)
+    .where(and(eq(transactionsTable.accountId, accountId), eq(transactionsTable.sourceId, transactionId)))
+    .limit(1);
+
+  if (existing.length === 0) {
+    return false;
+  }
+
+  await db
+    .delete(transactionsTable)
+    .where(and(eq(transactionsTable.accountId, accountId), eq(transactionsTable.sourceId, transactionId)));
+
+  return true;
 }
 
 export async function updateTransactionForAccount(
