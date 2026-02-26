@@ -22,11 +22,9 @@ export type AccountRecord = AccountSummaryRecord & {
   transactions: NormalizedTransaction[];
 };
 
-export type DashboardTransactionTab = "recent" | "aggregated";
-
 export type DashboardTransactionsViewInput = {
-  month: string;
-  transactionTab: DashboardTransactionTab;
+  startMonth?: string;
+  endMonth?: string;
 };
 
 export type DashboardTransactionRow = {
@@ -38,7 +36,8 @@ export type DashboardTransactionRow = {
 
 export type DashboardTransactionsView = {
   monthOptions: string[];
-  selectedMonth: string;
+  selectedStartMonth?: string;
+  selectedEndMonth?: string;
   importedTransactionCount: number;
   transactions: DashboardTransactionRow[];
 };
@@ -320,18 +319,33 @@ export async function getDashboardTransactionsView(
   const db = getFinanceDb();
 
   const monthOptions = await listTransactionMonthOptions();
-  const selectedMonth =
-    input.month !== "all" && monthOptions.includes(input.month) ? input.month : "all";
+  const latestMonth = monthOptions[0];
+  const defaultStartMonth = monthOptions[Math.min(2, Math.max(monthOptions.length - 1, 0))];
+  const hasValidStartMonth =
+    typeof input.startMonth === "string" && monthOptions.includes(input.startMonth);
+  const hasValidEndMonth = typeof input.endMonth === "string" && monthOptions.includes(input.endMonth);
+
+  let selectedStartMonth: string | undefined;
+  let selectedEndMonth: string | undefined;
+
+  if (latestMonth && defaultStartMonth && hasValidStartMonth && hasValidEndMonth) {
+    selectedStartMonth = input.startMonth!;
+    selectedEndMonth = input.endMonth!;
+    if (selectedStartMonth > selectedEndMonth) {
+      [selectedStartMonth, selectedEndMonth] = [selectedEndMonth, selectedStartMonth];
+    }
+  } else if (latestMonth && defaultStartMonth) {
+    selectedStartMonth = defaultStartMonth;
+    selectedEndMonth = latestMonth;
+  }
 
   const monthWhereClause =
-    selectedMonth === "all"
-      ? undefined
-      : sql`substr(${transactionsTable.bookingDate}, 1, 7) = ${selectedMonth}`;
-
-  const orderByColumns =
-    input.transactionTab === "aggregated"
-      ? [asc(transactionsTable.bookingDate), asc(transactionsTable.sourceId)]
-      : [desc(transactionsTable.bookingDate), asc(transactionsTable.sourceId)];
+    selectedStartMonth && selectedEndMonth
+      ? and(
+          sql`substr(${transactionsTable.bookingDate}, 1, 7) >= ${selectedStartMonth}`,
+          sql`substr(${transactionsTable.bookingDate}, 1, 7) <= ${selectedEndMonth}`
+        )
+      : undefined;
 
   const transactionSelection = {
     accountId: accounts.id,
@@ -355,10 +369,7 @@ export async function getDashboardTransactionsView(
     .from(transactionsTable)
     .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId));
   const scopedQuery = monthWhereClause ? baseQuery.where(monthWhereClause) : baseQuery;
-  const rows =
-    input.transactionTab === "recent"
-      ? await scopedQuery.orderBy(...orderByColumns).limit(25)
-      : await scopedQuery.orderBy(...orderByColumns);
+  const rows = await scopedQuery.orderBy(asc(transactionsTable.bookingDate), asc(transactionsTable.sourceId));
 
   const importedTransactionCount = await countImportedTransactions();
   const transactions: DashboardTransactionRow[] = rows.map((row) => {
@@ -386,7 +397,8 @@ export async function getDashboardTransactionsView(
 
   return {
     monthOptions,
-    selectedMonth,
+    selectedStartMonth,
+    selectedEndMonth,
     importedTransactionCount,
     transactions,
   };

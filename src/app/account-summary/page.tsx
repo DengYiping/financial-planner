@@ -25,6 +25,7 @@ export default async function AccountSummaryPage({
     typeof resolvedSearchParams.summaryMonth === "string"
       ? resolvedSearchParams.summaryMonth
       : undefined;
+  const hasSummaryMonthParam = typeof summaryMonthParam === "string";
   const hasUnexpectedParams = Object.entries(resolvedSearchParams).some(
     ([key, value]) => key !== "summaryMonth" || typeof value !== "string"
   );
@@ -38,7 +39,7 @@ export default async function AccountSummaryPage({
   const canonicalCurrentMonth = summaryMonthParam ? normalizeSummaryMonthKey(summaryMonthParam) : "";
   const canonicalSelectedMonth = view.selectedMonth ?? "";
 
-  if (hasUnexpectedParams || canonicalCurrentMonth !== canonicalSelectedMonth) {
+  if (hasUnexpectedParams || (hasSummaryMonthParam && canonicalCurrentMonth !== canonicalSelectedMonth)) {
     redirect(canonicalAccountSummaryUrl(view.selectedMonth));
   }
 

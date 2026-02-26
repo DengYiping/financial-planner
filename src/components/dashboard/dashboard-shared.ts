@@ -1,7 +1,6 @@
 import type { NormalizedTransaction, StatementProvider } from "@/lib/parsers";
 
 export type DashboardTab = "overview" | "transactions" | "account_summary";
-export type TransactionTab = "recent" | "aggregated";
 export type AccountKind = "aib_current" | "aib_mortgage" | "revolut_current" | "revolut_credit_card";
 export type AccountCurrency = "EUR" | "USD";
 type ParserStatus = "idle" | "loading" | "success" | "error";
@@ -79,14 +78,6 @@ export const ACCOUNT_COLORS = [
   "#B14747",
   "#5B7CBA",
 ];
-
-export function normalizeTransactionTab(value: string | null): TransactionTab {
-  if (value === "aggregated") {
-    return value;
-  }
-
-  return "recent";
-}
 
 export function normalizeMonthKey(value: string | null): string {
   if (value === "all") {
@@ -241,7 +232,7 @@ export function formatCurrencyCents(amountCents: number, currency: string, local
 
 export function tabPath(tab: DashboardTab): string {
   if (tab === "transactions") {
-    return "/transactions/recent";
+    return "/transactions";
   }
 
   if (tab === "account_summary") {

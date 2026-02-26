@@ -8,7 +8,6 @@ import {
   type SortingState,
   useReactTable,
 } from "@tanstack/react-table";
-import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -17,9 +16,7 @@ import { SectionShell } from "@/components/dashboard/section-shell";
 import {
   formatCurrencyCents,
   formatMonthLabel,
-  normalizeMonthKey,
   resolveErrorMessage,
-  type TransactionTab,
 } from "@/components/dashboard/dashboard-shared";
 import type { AppRouter } from "@/server/api/routers/_app";
 import { trpc } from "@/trpc/react";
@@ -30,7 +27,6 @@ type TransactionRow = TransactionsView["transactions"][number];
 type PersistedAccount = RouterOutputs["accounts"]["list"][number];
 
 type TransactionsContentProps = {
-  transactionTab: TransactionTab;
   view: TransactionsView;
 };
 
@@ -121,15 +117,7 @@ function toCreateTransactionDraft(account: AccountChoice | undefined, fallbackCu
   };
 }
 
-function transactionsSubTabPath(tab: TransactionTab): string {
-  if (tab === "aggregated") {
-    return "/transactions/aggregated";
-  }
-
-  return "/transactions/recent";
-}
-
-export function TransactionsContent({ transactionTab, view }: TransactionsContentProps) {
+export function TransactionsContent({ view }: TransactionsContentProps) {
   const router = useRouter();
   const pathname = usePathname();
   const [isMounted, setIsMounted] = useState(false);
@@ -576,15 +564,28 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
     updateTransactionMutation.isPending ||
     createTransactionMutation.isPending ||
     deleteTransactionMutation.isPending;
-  const monthQuery = view.selectedMonth === "all" ? "" : `?month=${encodeURIComponent(view.selectedMonth)}`;
-  const recentHref = `${transactionsSubTabPath("recent")}${monthQuery}`;
-  const aggregatedHref = `${transactionsSubTabPath("aggregated")}${monthQuery}`;
+  const selectedStartMonth = view.selectedStartMonth ?? "";
+  const selectedEndMonth = view.selectedEndMonth ?? "";
+
+  function navigateToMonthRange(nextStartMonth: string, nextEndMonth: string): void {
+    if (nextStartMonth.length === 0 || nextEndMonth.length === 0) {
+      router.replace(pathname, { scroll: false });
+      return;
+    }
+
+    const startMonth = nextStartMonth <= nextEndMonth ? nextStartMonth : nextEndMonth;
+    const endMonth = nextStartMonth <= nextEndMonth ? nextEndMonth : nextStartMonth;
+    const params = new URLSearchParams();
+    params.set("startMonth", startMonth);
+    params.set("endMonth", endMonth);
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  }
 
   return (
     <div className="animate-[tab-content-enter_280ms_cubic-bezier(0.22,1,0.36,1)] will-change-[opacity,transform]">
       <SectionShell
         title="Transactions"
-        subtitle="Cross-account transaction view with month filtering and account color coding."
+        subtitle="Cross-account transaction view with month-range filtering and account color coding."
         action={
           <div className="space-y-1 text-right">
             <p className="font-mono text-xs text-muted">{view.importedTransactionCount} imported</p>
@@ -592,30 +593,6 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
         }
       >
         <div className="mb-4 flex flex-wrap items-start gap-3">
-          <div className="inline-flex rounded-full border border-ink-soft/15 bg-surface p-1">
-            <Link
-              href={recentHref}
-              scroll={false}
-              className={`rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] transition ${
-                transactionTab === "recent"
-                  ? "bg-accent text-white shadow-[0_6px_16px_-10px_rgba(6,115,166,0.9)]"
-                  : "text-muted hover:text-foreground"
-              }`}
-            >
-              Recent (25)
-            </Link>
-            <Link
-              href={aggregatedHref}
-              scroll={false}
-              className={`rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.12em] transition ${
-                transactionTab === "aggregated"
-                  ? "bg-accent text-white shadow-[0_6px_16px_-10px_rgba(6,115,166,0.9)]"
-                  : "text-muted hover:text-foreground"
-              }`}
-            >
-              All Accounts Chronological
-            </Link>
-          </div>
           <button
             type="button"
             onClick={openCreateModal}
@@ -772,23 +749,56 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <label className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
-                Month
+                Start Month
                 <select
-                  value={view.selectedMonth}
+                  value={selectedStartMonth}
+                  disabled={view.monthOptions.length === 0}
                   onChange={(event) => {
-                    const month = normalizeMonthKey(event.target.value);
-                    const query = month === "all" ? "" : `?month=${encodeURIComponent(month)}`;
-                    const nextUrl = query ? `${pathname}${query}` : pathname;
-                    router.replace(nextUrl, { scroll: false });
+                    const nextStartMonth = event.target.value;
+                    const nextEndMonth =
+                      selectedEndMonth.length > 0 && nextStartMonth <= selectedEndMonth
+                        ? selectedEndMonth
+                        : nextStartMonth;
+                    navigateToMonthRange(nextStartMonth, nextEndMonth);
                   }}
                   className="rounded-full border border-ink-soft/20 bg-surface px-3 py-1.5 text-xs text-foreground outline-none focus:border-accent"
                 >
-                  <option value="all">All Months</option>
-                  {view.monthOptions.map((month) => (
-                    <option key={month} value={month}>
-                      {formatMonthLabel(month)}
-                    </option>
-                  ))}
+                  {view.monthOptions.length === 0 ? (
+                    <option value="">No months</option>
+                  ) : (
+                    view.monthOptions.map((month) => (
+                      <option key={month} value={month}>
+                        {formatMonthLabel(month)}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+
+              <label className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                End Month
+                <select
+                  value={selectedEndMonth}
+                  disabled={view.monthOptions.length === 0}
+                  onChange={(event) => {
+                    const nextEndMonth = event.target.value;
+                    const nextStartMonth =
+                      selectedStartMonth.length > 0 && selectedStartMonth <= nextEndMonth
+                        ? selectedStartMonth
+                        : nextEndMonth;
+                    navigateToMonthRange(nextStartMonth, nextEndMonth);
+                  }}
+                  className="rounded-full border border-ink-soft/20 bg-surface px-3 py-1.5 text-xs text-foreground outline-none focus:border-accent"
+                >
+                  {view.monthOptions.length === 0 ? (
+                    <option value="">No months</option>
+                  ) : (
+                    view.monthOptions.map((month) => (
+                      <option key={month} value={month}>
+                        {formatMonthLabel(month)}
+                      </option>
+                    ))
+                  )}
                 </select>
               </label>
 

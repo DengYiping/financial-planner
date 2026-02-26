@@ -32,9 +32,7 @@ const accountIdSchema = z.number().int().positive();
 const bookingDateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const monthKeyRegex = /^\d{4}-(0[1-9]|1[0-2])$/;
 const hexColorRegex = /^#(?:[0-9a-fA-F]{3}){1,2}$/;
-const transactionTabSchema = z.enum(["recent", "aggregated"]);
 const monthKeySchema = z.string().regex(monthKeyRegex);
-const monthFilterSchema = z.union([z.literal("all"), monthKeySchema]);
 
 const normalizedTransactionSchema = z.object({
   id: z.string().trim().min(1).max(160),
@@ -70,7 +68,8 @@ const transactionsViewRowSchema = z.object({
 
 const transactionsViewSchema = z.object({
   monthOptions: z.array(monthKeySchema),
-  selectedMonth: monthFilterSchema,
+  selectedStartMonth: monthKeySchema.optional(),
+  selectedEndMonth: monthKeySchema.optional(),
   importedTransactionCount: z.number().int().nonnegative(),
   transactions: z.array(transactionsViewRowSchema),
 });
@@ -252,16 +251,16 @@ export const accountsRouter = createTRPCRouter({
   transactionsView: publicProcedure
     .input(
       z.object({
-        month: monthFilterSchema.optional().default("all"),
-        transactionTab: transactionTabSchema.optional().default("recent"),
+        startMonth: monthKeySchema.optional(),
+        endMonth: monthKeySchema.optional(),
       })
     )
     .output(transactionsViewSchema)
     .query(async ({ input }) => {
       try {
         const view = await getDashboardTransactionsView({
-          month: input.month,
-          transactionTab: input.transactionTab,
+          startMonth: input.startMonth,
+          endMonth: input.endMonth,
         });
 
         return view;
