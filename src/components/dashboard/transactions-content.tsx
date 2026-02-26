@@ -1,7 +1,14 @@
 "use client";
 
+import {
+  type ColumnDef,
+  flexRender,
+  getCoreRowModel,
+  useReactTable,
+} from "@tanstack/react-table";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { useMemo } from "react";
 import type { inferRouterOutputs } from "@trpc/server";
 import { SectionShell } from "@/components/dashboard/section-shell";
 import {
@@ -14,6 +21,7 @@ import type { AppRouter } from "@/server/api/routers/_app";
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
 type TransactionsView = RouterOutputs["accounts"]["transactionsView"];
+type TransactionRow = TransactionsView["transactions"][number];
 
 type TransactionsContentProps = {
   transactionTab: TransactionTab;
@@ -31,6 +39,67 @@ function transactionsSubTabPath(tab: TransactionTab): string {
 export function TransactionsContent({ transactionTab, view }: TransactionsContentProps) {
   const router = useRouter();
   const pathname = usePathname();
+  const columns = useMemo<ColumnDef<TransactionRow>[]>(
+    () => [
+      {
+        id: "description",
+        header: "Description",
+        cell: ({ row }) => row.original.transaction.description,
+      },
+      {
+        id: "category",
+        header: "Category",
+        cell: ({ row }) => row.original.transaction.categoryHint ?? "Uncategorized",
+      },
+      {
+        id: "account",
+        header: "Account",
+        cell: ({ row }) => (
+          <span
+            className="inline-flex items-center gap-2 rounded-full border border-ink-soft/20 px-2.5 py-1 text-xs font-semibold"
+            style={{ color: row.original.accountColor }}
+          >
+            <span
+              className="inline-block h-2.5 w-2.5 rounded-full"
+              style={{ backgroundColor: row.original.accountColor }}
+              aria-hidden
+            />
+            {row.original.accountName}
+          </span>
+        ),
+      },
+      {
+        id: "date",
+        header: "Date",
+        cell: ({ row }) => row.original.transaction.bookingDate,
+      },
+      {
+        id: "amount",
+        header: "Amount",
+        cell: ({ row }) => {
+          const transaction = row.original.transaction;
+          const isIncome = transaction.direction === "in";
+          const amount = formatCurrencyCents(transaction.amountCents, transaction.currency || "EUR");
+
+          return (
+            <>
+              {isIncome ? "+" : "-"}
+              {amount}
+            </>
+          );
+        },
+      },
+    ],
+    []
+  );
+  // TanStack table exposes mutable APIs that React Compiler's compatibility lint does not support.
+  // eslint-disable-next-line react-hooks/incompatible-library
+  const table = useReactTable({
+    data: view.transactions,
+    columns,
+    getCoreRowModel: getCoreRowModel(),
+    getRowId: (row) => `${row.accountId}-${row.transaction.id}`,
+  });
 
   const monthQuery = view.selectedMonth === "all" ? "" : `?month=${encodeURIComponent(view.selectedMonth)}`;
   const recentHref = `${transactionsSubTabPath("recent")}${monthQuery}`;
@@ -98,16 +167,24 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
         <div className="overflow-x-auto">
           <table className="w-full min-w-[700px] border-separate border-spacing-y-2">
             <thead className="text-left text-xs uppercase tracking-[0.14em] text-muted">
-              <tr>
-                <th className="px-3 py-2">Description</th>
-                <th className="px-3 py-2">Category</th>
-                <th className="px-3 py-2">Account</th>
-                <th className="px-3 py-2">Date</th>
-                <th className="px-3 py-2 text-right">Amount</th>
-              </tr>
+              {table.getHeaderGroups().map((headerGroup) => (
+                <tr key={headerGroup.id}>
+                  {headerGroup.headers.map((header) => {
+                    const isAmount = header.column.id === "amount";
+
+                    return (
+                      <th key={header.id} className={`px-3 py-2 ${isAmount ? "text-right" : ""}`}>
+                        {header.isPlaceholder
+                          ? null
+                          : flexRender(header.column.columnDef.header, header.getContext())}
+                      </th>
+                    );
+                  })}
+                </tr>
+              ))}
             </thead>
             <tbody>
-              {view.transactions.length === 0 ? (
+              {table.getRowModel().rows.length === 0 ? (
                 <tr className="rounded-2xl bg-surface">
                   <td
                     colSpan={5}
@@ -117,43 +194,38 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                   </td>
                 </tr>
               ) : (
-                view.transactions.map((row) => {
-                  const transaction = row.transaction;
-                  const isIncome = transaction.direction === "in";
-                  const amount = formatCurrencyCents(transaction.amountCents, transaction.currency || "EUR");
-
+                table.getRowModel().rows.map((row) => {
                   return (
-                    <tr key={`${row.accountId}-${transaction.id}`} className="rounded-2xl bg-surface">
-                      <td className="rounded-l-xl border border-r-0 border-ink-soft/15 px-3 py-3 text-sm text-foreground">
-                        {transaction.description}
-                      </td>
-                      <td className="border-y border-ink-soft/15 px-3 py-3 text-sm text-muted">
-                        {transaction.categoryHint ?? "Uncategorized"}
-                      </td>
-                      <td className="border-y border-ink-soft/15 px-3 py-3 text-sm">
-                        <span
-                          className="inline-flex items-center gap-2 rounded-full border border-ink-soft/20 px-2.5 py-1 text-xs font-semibold"
-                          style={{ color: row.accountColor }}
-                        >
-                          <span
-                            className="inline-block h-2.5 w-2.5 rounded-full"
-                            style={{ backgroundColor: row.accountColor }}
-                            aria-hidden
-                          />
-                          {row.accountName}
-                        </span>
-                      </td>
-                      <td className="border-y border-ink-soft/15 px-3 py-3 font-mono text-xs text-muted">
-                        {transaction.bookingDate}
-                      </td>
-                      <td
-                        className={`rounded-r-xl border border-l-0 border-ink-soft/15 px-3 py-3 text-right font-mono text-sm ${
-                          isIncome ? "text-positive" : "text-foreground"
-                        }`}
-                      >
-                        {isIncome ? "+" : "-"}
-                        {amount}
-                      </td>
+                    <tr key={row.id} className="rounded-2xl bg-surface">
+                      {row.getVisibleCells().map((cell) => {
+                        const isDescription = cell.column.id === "description";
+                        const isCategory = cell.column.id === "category";
+                        const isAccount = cell.column.id === "account";
+                        const isDate = cell.column.id === "date";
+                        const isAmount = cell.column.id === "amount";
+                        const isIncome = row.original.transaction.direction === "in";
+
+                        return (
+                          <td
+                            key={cell.id}
+                            className={[
+                              "border-ink-soft/15 px-3 py-3",
+                              isDescription && "rounded-l-xl border border-r-0 text-sm text-foreground",
+                              isCategory && "border-y text-sm text-muted",
+                              isAccount && "border-y text-sm",
+                              isDate && "border-y font-mono text-xs text-muted",
+                              isAmount &&
+                                `rounded-r-xl border border-l-0 text-right font-mono text-sm ${
+                                  isIncome ? "text-positive" : "text-foreground"
+                                }`,
+                            ]
+                              .filter(Boolean)
+                              .join(" ")}
+                          >
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </td>
+                        );
+                      })}
                     </tr>
                   );
                 })
