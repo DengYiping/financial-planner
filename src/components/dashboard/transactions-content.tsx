@@ -160,11 +160,11 @@ function toCreateRuleDraftFromTransaction(draft: EditableTransactionDraft): Rule
   return {
     descriptionContains: draft.description,
     descriptionRegex: "",
-    amountExact: draft.amount,
+    amountExact: "",
     amountMin: "",
     amountMax: "",
-    accountIds: draft.accountId > 0 ? [draft.accountId] : [],
-    applyCategory: draft.categoryHint,
+    accountIds: [],
+    applyCategory: "",
     assignCounterpartyFromRegexGroup: false,
     priority: RULE_DEFAULT_PRIORITY,
   };
