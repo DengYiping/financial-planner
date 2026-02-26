@@ -10,6 +10,7 @@ export type NormalizedTransaction = {
   currency: string;
   direction: TransactionDirection;
   description: string;
+  categoryId?: number;
   categoryHint?: string;
   counterparty?: string;
   reference?: string;

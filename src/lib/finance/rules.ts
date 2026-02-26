@@ -14,7 +14,7 @@ export type TransactionRuleWriteInput = {
   amountMaxCents?: number | null;
   amountExactCents?: number | null;
   accountIds?: number[] | null;
-  applyCategory?: string | null;
+  applyCategoryId?: number | null;
   assignCounterpartyFromRegexGroup?: boolean | null;
   priority: number;
 };
@@ -26,7 +26,7 @@ export type ValidatedTransactionRuleWriteInput = {
   amountMaxCents?: number;
   amountExactCents?: number;
   accountIds?: number[];
-  applyCategory?: string;
+  applyCategoryId?: number;
   assignCounterpartyFromRegexGroup: boolean;
   priority: number;
 };
@@ -39,7 +39,8 @@ export type TransactionRuleRecord = {
   amountMaxCents?: number;
   amountExactCents?: number;
   accountIds?: number[];
-  applyCategory?: string;
+  applyCategoryId?: number;
+  applyCategoryName?: string;
   assignCounterpartyFromRegexGroup: boolean;
   priority: number;
   createdAt: string;
@@ -54,12 +55,12 @@ export type RuleEvaluationInput = {
   accountId: number;
   description: string;
   amountCents: number;
-  categoryHint?: string;
+  categoryId?: number;
   counterparty?: string;
 };
 
 export type RuleEvaluationResult = {
-  categoryHint?: string;
+  categoryId?: number;
   counterparty?: string;
 };
 
@@ -86,6 +87,21 @@ function normalizeOptionalInteger(
 
   if (value < 0) {
     throw new TransactionRuleValidationError(`${fieldName} must be greater than or equal to 0.`);
+  }
+
+  return value;
+}
+
+function normalizeOptionalPositiveInteger(
+  value: number | null | undefined,
+  fieldName: string
+): number | undefined {
+  if (typeof value === "undefined" || value === null) {
+    return undefined;
+  }
+
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new TransactionRuleValidationError(`${fieldName} must be a positive integer.`);
   }
 
   return value;
@@ -148,7 +164,7 @@ export function mapTransactionRuleRow(row: TransactionRuleRow): TransactionRuleR
     amountMaxCents: typeof row.amountMaxCents === "number" ? row.amountMaxCents : undefined,
     amountExactCents: typeof row.amountExactCents === "number" ? row.amountExactCents : undefined,
     accountIds: parseRuleAccountIdsJson(row.accountIdsJson),
-    applyCategory: normalizeOptionalText(row.applyCategory),
+    applyCategoryId: typeof row.applyCategoryId === "number" ? row.applyCategoryId : undefined,
     assignCounterpartyFromRegexGroup: row.assignCounterpartyFromRegexGroup,
     priority: row.priority,
     createdAt: row.createdAt,
@@ -165,7 +181,7 @@ export function validateAndNormalizeTransactionRuleInput(
   const amountMaxCents = normalizeOptionalInteger(input.amountMaxCents, "amountMaxCents");
   const amountExactCents = normalizeOptionalInteger(input.amountExactCents, "amountExactCents");
   const accountIds = normalizeAccountIds(input.accountIds);
-  const applyCategory = normalizeOptionalText(input.applyCategory);
+  const applyCategoryId = normalizeOptionalPositiveInteger(input.applyCategoryId, "applyCategoryId");
   const assignCounterpartyFromRegexGroup = input.assignCounterpartyFromRegexGroup === true;
 
   if (!Number.isInteger(input.priority)) {
@@ -218,7 +234,7 @@ export function validateAndNormalizeTransactionRuleInput(
     throw new TransactionRuleValidationError("At least one condition is required.");
   }
 
-  const hasAction = typeof applyCategory === "string" || assignCounterpartyFromRegexGroup;
+  const hasAction = typeof applyCategoryId === "number" || assignCounterpartyFromRegexGroup;
   if (!hasAction) {
     throw new TransactionRuleValidationError("At least one action is required.");
   }
@@ -230,7 +246,7 @@ export function validateAndNormalizeTransactionRuleInput(
     amountMaxCents,
     amountExactCents,
     accountIds,
-    applyCategory,
+    applyCategoryId,
     assignCounterpartyFromRegexGroup,
     priority: input.priority,
   };
@@ -323,7 +339,7 @@ export function applyPreparedTransactionRules(
   rules: PreparedTransactionRule[],
   input: RuleEvaluationInput
 ): RuleEvaluationResult {
-  let categoryHint = normalizeOptionalText(input.categoryHint);
+  let categoryId = normalizeOptionalPositiveInteger(input.categoryId, "categoryId");
   let counterparty = normalizeOptionalText(input.counterparty);
 
   rules.forEach((rule) => {
@@ -337,8 +353,8 @@ export function applyPreparedTransactionRules(
       return;
     }
 
-    if (typeof rule.applyCategory === "string") {
-      categoryHint = rule.applyCategory;
+    if (typeof rule.applyCategoryId === "number") {
+      categoryId = rule.applyCategoryId;
     }
 
     if (
@@ -354,7 +370,7 @@ export function applyPreparedTransactionRules(
   });
 
   return {
-    categoryHint,
+    categoryId,
     counterparty,
   };
 }

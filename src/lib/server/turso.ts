@@ -13,7 +13,7 @@ type TursoConfig = {
 
 let tursoClient: Client | null = null;
 let financeDb: LibSQLDatabase<typeof financeSchema> | null = null;
-let schemaBootstrapPromise: Promise<void> | null = null;
+let schemaValidationPromise: Promise<void> | null = null;
 let localEnvLoadAttempted = false;
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -114,72 +114,29 @@ export function getFinanceDb(): LibSQLDatabase<typeof financeSchema> {
   return financeDb;
 }
 
-async function bootstrapSchema(db: LibSQLDatabase<typeof financeSchema>): Promise<void> {
+async function validateFinanceSchema(db: LibSQLDatabase<typeof financeSchema>): Promise<void> {
   await db.run(sql`PRAGMA foreign_keys = ON`);
-
-  await db.run(sql`
-    CREATE TABLE IF NOT EXISTS accounts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      provider TEXT NOT NULL CHECK (provider IN ('aib', 'revolut')),
-      currency TEXT,
-      color TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-    )
+  const existing = await db.all<{ name: string }>(sql`
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name IN ('accounts', 'transactions', 'transaction_rules', 'categories', '__drizzle_migrations')
   `);
-
-  await db.run(sql`
-    CREATE TABLE IF NOT EXISTS transactions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      account_id INTEGER NOT NULL,
-      source_id TEXT NOT NULL,
-      provider TEXT NOT NULL CHECK (provider IN ('aib', 'revolut')),
-      booking_date TEXT NOT NULL,
-      amount_cents INTEGER NOT NULL,
-      currency TEXT NOT NULL,
-      direction TEXT NOT NULL CHECK (direction IN ('in', 'out')),
-      description TEXT NOT NULL,
-      category_hint TEXT,
-      counterparty TEXT,
-      reference TEXT,
-      raw_json TEXT NOT NULL,
-      imported_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
-    )
-  `);
-
-  await db.run(sql`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_account_source_unique
-    ON transactions (account_id, source_id)
-  `);
-
-  await db.run(sql`
-    CREATE INDEX IF NOT EXISTS idx_transactions_account_booking_date
-    ON transactions (account_id, booking_date DESC)
-  `);
-
-  await db.run(sql`
-    CREATE TABLE IF NOT EXISTS transaction_rules (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      description_contains TEXT,
-      description_regex TEXT,
-      amount_min_cents INTEGER,
-      amount_max_cents INTEGER,
-      amount_exact_cents INTEGER,
-      account_ids_json TEXT,
-      apply_category TEXT,
-      assign_counterparty_from_regex_group INTEGER NOT NULL DEFAULT 0 CHECK (assign_counterparty_from_regex_group IN (0, 1)),
-      priority INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-    )
-  `);
-
-  await db.run(sql`
-    CREATE INDEX IF NOT EXISTS idx_transaction_rules_priority
-    ON transaction_rules (priority ASC, id ASC)
-  `);
+  const existingNames = new Set(existing.map((row) => row.name));
+  const requiredTables = [
+    "accounts",
+    "transactions",
+    "transaction_rules",
+    "categories",
+    "__drizzle_migrations",
+  ];
+  const missingTables = requiredTables.filter((tableName) => !existingNames.has(tableName));
+  if (missingTables.length > 0) {
+    throw new Error(
+      `Finance schema is not migrated. Missing tables: ${missingTables.join(", ")}. ` +
+        "Run `pnpm db:migrate` to apply Drizzle migrations."
+    );
+  }
 }
 
 export async function resetFinanceSchemaForLocal(): Promise<void> {
@@ -192,20 +149,21 @@ export async function resetFinanceSchemaForLocal(): Promise<void> {
   await db.run(sql`PRAGMA foreign_keys = OFF`);
   await db.run(sql`DROP TABLE IF EXISTS transactions`);
   await db.run(sql`DROP TABLE IF EXISTS transaction_rules`);
+  await db.run(sql`DROP TABLE IF EXISTS categories`);
   await db.run(sql`DROP TABLE IF EXISTS accounts`);
+  await db.run(sql`DROP TABLE IF EXISTS __drizzle_migrations`);
   await db.run(sql`PRAGMA foreign_keys = ON`);
 
-  schemaBootstrapPromise = null;
-  await ensureFinanceSchema();
+  schemaValidationPromise = null;
 }
 
 export async function ensureFinanceSchema(): Promise<void> {
-  if (!schemaBootstrapPromise) {
-    schemaBootstrapPromise = bootstrapSchema(getFinanceDb()).catch((error) => {
-      schemaBootstrapPromise = null;
+  if (!schemaValidationPromise) {
+    schemaValidationPromise = validateFinanceSchema(getFinanceDb()).catch((error) => {
+      schemaValidationPromise = null;
       throw error;
     });
   }
 
-  await schemaBootstrapPromise;
+  await schemaValidationPromise;
 }

@@ -15,6 +15,20 @@
       "when": 1772079946713,
       "tag": "0001_milky_shen",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1772139581423,
+      "tag": "0002_category_fk_refactor",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1772139616401,
+      "tag": "0003_clean_shockwave",
+      "breakpoints": true
     }
   ]
 }

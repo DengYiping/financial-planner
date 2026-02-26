@@ -10,6 +10,7 @@ import { trpc } from "@/trpc/react";
 type RouterInputs = inferRouterInputs<AppRouter>;
 type RouterOutputs = inferRouterOutputs<AppRouter>;
 type PersistedAccount = RouterOutputs["accounts"]["list"][number];
+type PersistedCategory = RouterOutputs["accounts"]["listCategories"][number];
 type PersistedRule = RouterOutputs["accounts"]["listRules"][number];
 
 type RuleRecord = {
@@ -20,7 +21,8 @@ type RuleRecord = {
   amountMinCents?: number;
   amountMaxCents?: number;
   accountIds: number[];
-  actionCategory?: string;
+  actionCategoryId?: number;
+  actionCategoryName?: string;
   assignCounterpartyFromRegexCapture: boolean;
   priority: number;
 };
@@ -32,7 +34,7 @@ type RuleDraft = {
   amountMin: string;
   amountMax: string;
   accountIds: number[];
-  actionCategory: string;
+  actionCategoryId: string;
   assignCounterpartyFromRegexCapture: boolean;
   priority: string;
 };
@@ -41,6 +43,11 @@ type AccountChoice = {
   id: number;
   name: string;
   color: string;
+};
+
+type CategoryChoice = {
+  id: number;
+  name: string;
 };
 
 const AMOUNT_PATTERN = /^\d+(?:[.,]\d{1,2})?$/;
@@ -54,7 +61,7 @@ function createEmptyDraft(): RuleDraft {
     amountMin: "",
     amountMax: "",
     accountIds: [],
-    actionCategory: "",
+    actionCategoryId: "",
     assignCounterpartyFromRegexCapture: false,
     priority: String(DEFAULT_PRIORITY),
   };
@@ -99,7 +106,8 @@ function toRuleRecord(rule: PersistedRule): RuleRecord {
     amountMinCents: rule.amountMinCents,
     amountMaxCents: rule.amountMaxCents,
     accountIds: rule.accountIds ?? [],
-    actionCategory: rule.applyCategory,
+    actionCategoryId: rule.applyCategoryId,
+    actionCategoryName: rule.applyCategoryName,
     assignCounterpartyFromRegexCapture: rule.assignCounterpartyFromRegexGroup,
     priority: rule.priority,
   };
@@ -117,7 +125,7 @@ function toRuleDraft(rule: RuleRecord): RuleDraft {
     amountMin: toAmountInput(rule.amountMinCents),
     amountMax: toAmountInput(rule.amountMaxCents),
     accountIds: [...rule.accountIds],
-    actionCategory: rule.actionCategory ?? "",
+    actionCategoryId: typeof rule.actionCategoryId === "number" ? String(rule.actionCategoryId) : "",
     assignCounterpartyFromRegexCapture: rule.assignCounterpartyFromRegexCapture,
     priority: String(rule.priority),
   };
@@ -132,7 +140,11 @@ function buildRulePayload(
 ): RouterInputs["accounts"]["createRule"] {
   const descriptionContains = draft.descriptionContains.trim() || undefined;
   const descriptionRegex = draft.descriptionRegex.trim() || undefined;
-  const actionCategory = draft.actionCategory.trim() || undefined;
+  const actionCategoryIdValue = Number.parseInt(draft.actionCategoryId, 10);
+  const applyCategoryId =
+    Number.isInteger(actionCategoryIdValue) && actionCategoryIdValue > 0
+      ? actionCategoryIdValue
+      : undefined;
   const accountIds = [...draft.accountIds].sort((a, b) => a - b);
 
   return {
@@ -142,7 +154,7 @@ function buildRulePayload(
     amountMinCents: minCents,
     amountMaxCents: maxCents,
     accountIds: accountIds.length > 0 ? accountIds : undefined,
-    applyCategory: actionCategory,
+    applyCategoryId,
     assignCounterpartyFromRegexGroup: draft.assignCounterpartyFromRegexCapture,
     priority: parsedPriority,
   };
@@ -184,11 +196,14 @@ function summarizeConditions(rule: RuleRecord, accountNameById: Map<number, stri
   return parts.length > 0 ? parts.join(" • ") : "No condition details";
 }
 
-function summarizeActions(rule: RuleRecord): string {
+function summarizeActions(rule: RuleRecord, categoryNameById: Map<number, string>): string {
   const parts: string[] = [];
 
-  if (rule.actionCategory) {
-    parts.push(`Set category to "${rule.actionCategory}"`);
+  if (typeof rule.actionCategoryId === "number") {
+    const categoryName = categoryNameById.get(rule.actionCategoryId) ?? rule.actionCategoryName;
+    if (categoryName) {
+      parts.push(`Set category to "${categoryName}"`);
+    }
   }
 
   if (rule.assignCounterpartyFromRegexCapture) {
@@ -201,6 +216,7 @@ function summarizeActions(rule: RuleRecord): string {
 export function RulesContent() {
   const utils = trpc.useUtils();
   const accountsQuery = trpc.accounts.list.useQuery();
+  const categoriesQuery = trpc.accounts.listCategories.useQuery();
   const rulesQuery = trpc.accounts.listRules.useQuery();
   const createRuleMutation = trpc.accounts.createRule.useMutation();
   const updateRuleMutation = trpc.accounts.updateRule.useMutation();
@@ -226,6 +242,16 @@ export function RulesContent() {
         .sort((a, b) => a.name.localeCompare(b.name)),
     [accountsQuery.data]
   );
+  const categoryChoices = useMemo<CategoryChoice[]>(
+    () =>
+      (categoriesQuery.data ?? [])
+        .map((category: PersistedCategory) => ({
+          id: category.id,
+          name: category.name,
+        }))
+        .sort((left, right) => left.name.localeCompare(right.name)),
+    [categoriesQuery.data]
+  );
   const accountNameById = useMemo(() => {
     const map = new Map<number, string>();
     accountChoices.forEach((account) => {
@@ -233,12 +259,21 @@ export function RulesContent() {
     });
     return map;
   }, [accountChoices]);
+  const categoryNameById = useMemo(() => {
+    const map = new Map<number, string>();
+    categoryChoices.forEach((category) => {
+      map.set(category.id, category.name);
+    });
+    return map;
+  }, [categoryChoices]);
 
   const isEditing = editingRuleId !== null;
   const isSaving = createRuleMutation.isPending || updateRuleMutation.isPending;
   const isMutating = isSaving || deleteRuleMutation.isPending || reapplyRulesMutation.isPending;
   const loadError = rulesQuery.error
     ? resolveErrorMessage(rulesQuery.error, "Failed to load rules.")
+    : categoriesQuery.error
+      ? resolveErrorMessage(categoriesQuery.error, "Failed to load categories.")
     : accountsQuery.error
       ? resolveErrorMessage(accountsQuery.error, "Failed to load accounts.")
       : null;
@@ -315,6 +350,13 @@ export function RulesContent() {
 
     if (draft.assignCounterpartyFromRegexCapture && draft.descriptionRegex.trim().length === 0) {
       setFormError("Description regex is required when assigning counterparty from capture group.");
+      return;
+    }
+
+    const parsedCategoryId = Number.parseInt(draft.actionCategoryId, 10);
+    const hasCategoryAction = Number.isInteger(parsedCategoryId) && parsedCategoryId > 0;
+    if (!hasCategoryAction && !draft.assignCounterpartyFromRegexCapture) {
+      setFormError("Select a category or enable counterparty assignment.");
       return;
     }
 
@@ -424,6 +466,7 @@ export function RulesContent() {
               {reapplyRulesMutation.isPending ? "Re-applying..." : "Re-Apply Rules"}
             </button>
             <p className="font-mono text-xs text-muted">{rules.length} rules</p>
+            <p className="font-mono text-xs text-muted">{categoryChoices.length} categories available</p>
             <p className="font-mono text-xs text-muted">{accountChoices.length} accounts available</p>
           </div>
         }
@@ -513,7 +556,7 @@ export function RulesContent() {
                         </div>
                       </header>
                       <p className="text-xs text-muted">{summarizeConditions(rule, accountNameById)}</p>
-                      <p className="mt-2 text-xs text-foreground">{summarizeActions(rule)}</p>
+                      <p className="mt-2 text-xs text-foreground">{summarizeActions(rule, categoryNameById)}</p>
                     </article>
                   </li>
                 );
@@ -711,18 +754,23 @@ export function RulesContent() {
                 <div className="grid gap-3 md:grid-cols-[1fr_auto]">
                   <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.1em] text-muted">
                     Action Category
-                    <input
-                      type="text"
-                      value={draft.actionCategory}
+                    <select
+                      value={draft.actionCategoryId}
                       onChange={(event) => {
                         setDraft((current) => ({
                           ...current,
-                          actionCategory: event.target.value,
+                          actionCategoryId: event.target.value,
                         }));
                       }}
-                      placeholder="e.g. Transport"
                       className="rounded-full border border-ink-soft/20 bg-surface px-3 py-2 text-xs text-foreground outline-none focus:border-accent"
-                    />
+                    >
+                      <option value="">Uncategorized</option>
+                      {categoryChoices.map((category) => (
+                        <option key={category.id} value={String(category.id)}>
+                          {category.name}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted">
                     <input

@@ -53,13 +53,13 @@ test("validateAndNormalizeTransactionRuleInput normalizes fields", () => {
     amountMinCents: 100,
     amountMaxCents: 5000,
     accountIds: [3, 1, 3, 2],
-    applyCategory: "  transport  ",
+    applyCategoryId: 7,
     assignCounterpartyFromRegexGroup: true,
     priority: 9,
   });
 
   assert.equal(normalized.descriptionContains, "Uber");
-  assert.equal(normalized.applyCategory, "transport");
+  assert.equal(normalized.applyCategoryId, 7);
   assert.deepEqual(normalized.accountIds, [1, 2, 3]);
   assert.equal(normalized.assignCounterpartyFromRegexGroup, true);
 });
@@ -73,7 +73,7 @@ test("mapTransactionRuleRow parses persisted account id set", () => {
     amountMaxCents: null,
     amountExactCents: null,
     accountIdsJson: "[3,2,2,1,0,-5,\"bad\"]",
-    applyCategory: "transport",
+    applyCategoryId: 9,
     assignCounterpartyFromRegexGroup: false,
     priority: 4,
     createdAt: "2026-02-26T00:00:00Z",
@@ -111,7 +111,7 @@ test("applyPreparedTransactionRules evaluates conditions with AND semantics", ()
       amountMinCents: 1000,
       amountMaxCents: 3000,
       accountIds: [2],
-      applyCategory: "transport",
+      applyCategoryId: 3,
       assignCounterpartyFromRegexGroup: false,
       priority: 10,
       createdAt: "",
@@ -124,21 +124,21 @@ test("applyPreparedTransactionRules evaluates conditions with AND semantics", ()
     description: "Uber Trip Dublin",
     amountCents: 1500,
   });
-  assert.equal(match.categoryHint, "transport");
+  assert.equal(match.categoryId, 3);
 
   const noMatchAmount = applyPreparedTransactionRules(preparedRules, {
     accountId: 2,
     description: "Uber Trip Dublin",
     amountCents: 800,
   });
-  assert.equal(noMatchAmount.categoryHint, undefined);
+  assert.equal(noMatchAmount.categoryId, undefined);
 
   const noMatchAccount = applyPreparedTransactionRules(preparedRules, {
     accountId: 1,
     description: "Uber Trip Dublin",
     amountCents: 1500,
   });
-  assert.equal(noMatchAccount.categoryHint, undefined);
+  assert.equal(noMatchAccount.categoryId, undefined);
 });
 
 test("applyPreparedTransactionRules applies higher priority rules last", () => {
@@ -146,7 +146,7 @@ test("applyPreparedTransactionRules applies higher priority rules last", () => {
     {
       id: 10,
       descriptionContains: "payment",
-      applyCategory: "generic",
+      applyCategoryId: 4,
       assignCounterpartyFromRegexGroup: false,
       priority: 10,
       createdAt: "",
@@ -155,7 +155,7 @@ test("applyPreparedTransactionRules applies higher priority rules last", () => {
     {
       id: 11,
       descriptionContains: "payment",
-      applyCategory: "food",
+      applyCategoryId: 12,
       assignCounterpartyFromRegexGroup: false,
       priority: 100,
       createdAt: "",
@@ -169,7 +169,7 @@ test("applyPreparedTransactionRules applies higher priority rules last", () => {
     amountCents: 1200,
   });
 
-  assert.equal(result.categoryHint, "food");
+  assert.equal(result.categoryId, 12);
 });
 
 test("applyPreparedTransactionRules extracts counterparty from first regex group", () => {

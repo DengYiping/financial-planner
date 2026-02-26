@@ -3,7 +3,9 @@ import { z } from "zod";
 import {
   createTransactionForAccount,
   createAccount,
+  createCategory,
   createTransactionRule,
+  deleteCategory,
   deleteAccountById,
   deleteTransactionRule,
   deleteTransactionForAccount,
@@ -13,8 +15,10 @@ import {
   importTransactionsForAccount,
   isUniqueConstraintError,
   listAccounts,
+  listCategories,
   listTransactionRules,
   reapplyTransactionRulesForAllTransactions,
+  updateCategory,
   updateTransactionRule,
   updateTransactionForAccount,
   type AccountRecord,
@@ -42,6 +46,7 @@ const bookingDateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const monthKeyRegex = /^\d{4}-(0[1-9]|1[0-2])$/;
 const hexColorRegex = /^#(?:[0-9a-fA-F]{3}){1,2}$/;
 const monthKeySchema = z.string().regex(monthKeyRegex);
+const categoryNameSchema = z.string().trim().min(1).max(120);
 
 const normalizedTransactionSchema = z.object({
   id: z.string().trim().min(1).max(160),
@@ -51,6 +56,7 @@ const normalizedTransactionSchema = z.object({
   currency: z.string().trim().min(1).max(16),
   direction: z.enum(["in", "out"]),
   description: z.string().trim().min(1).max(500),
+  categoryId: accountIdSchema.optional(),
   categoryHint: z.string().trim().min(1).max(120).optional(),
   counterparty: z.string().trim().min(1).max(300).optional(),
   reference: z.string().trim().min(1).max(300).optional(),
@@ -112,7 +118,8 @@ const transactionRuleSchema = z.object({
   amountMaxCents: z.number().int().nonnegative().optional(),
   amountExactCents: z.number().int().nonnegative().optional(),
   accountIds: z.array(accountIdSchema).min(1).optional(),
-  applyCategory: z.string().min(1).max(120).optional(),
+  applyCategoryId: accountIdSchema.optional(),
+  applyCategoryName: z.string().min(1).max(120).optional(),
   assignCounterpartyFromRegexGroup: z.boolean(),
   priority: z.number().int(),
   createdAt: z.string(),
@@ -127,14 +134,13 @@ const transactionRuleInputSchema = z
     amountMaxCents: z.number().int().nonnegative().nullish(),
     amountExactCents: z.number().int().nonnegative().nullish(),
     accountIds: z.array(accountIdSchema).max(500).nullish(),
-    applyCategory: z.string().trim().max(120).nullish(),
+    applyCategoryId: accountIdSchema.nullish(),
     assignCounterpartyFromRegexGroup: z.boolean().optional(),
     priority: z.number().int(),
   })
   .superRefine((value, ctx) => {
     const descriptionContains = normalizeOptionalText(value.descriptionContains);
     const descriptionRegex = normalizeOptionalText(value.descriptionRegex);
-    const applyCategory = normalizeOptionalText(value.applyCategory);
     const hasAccountIdCondition = Array.isArray(value.accountIds) && value.accountIds.length > 0;
 
     if (descriptionRegex) {
@@ -209,7 +215,7 @@ const transactionRuleInputSchema = z
       });
     }
 
-    const hasAction = typeof applyCategory === "string" || value.assignCounterpartyFromRegexGroup === true;
+    const hasAction = typeof value.applyCategoryId === "number" || value.assignCounterpartyFromRegexGroup === true;
     if (!hasAction) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -217,6 +223,13 @@ const transactionRuleInputSchema = z
       });
     }
   });
+
+const categorySchema = z.object({
+  id: accountIdSchema,
+  name: categoryNameSchema,
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
 
 type AccountKind = z.infer<typeof accountKindSchema>;
 type TransactionRuleInput = z.infer<typeof transactionRuleInputSchema>;
@@ -238,7 +251,7 @@ function toTransactionRuleWriteInput(input: TransactionRuleInput): TransactionRu
     amountMaxCents: input.amountMaxCents ?? undefined,
     amountExactCents: input.amountExactCents ?? undefined,
     accountIds: input.accountIds ?? undefined,
-    applyCategory: normalizeOptionalText(input.applyCategory),
+    applyCategoryId: input.applyCategoryId ?? undefined,
     assignCounterpartyFromRegexGroup: input.assignCounterpartyFromRegexGroup ?? false,
     priority: input.priority,
   };
@@ -382,6 +395,123 @@ export const accountsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Failed to delete account.",
+        });
+      }
+    }),
+
+  listCategories: publicProcedure.output(z.array(categorySchema)).query(async () => {
+    try {
+      return await listCategories();
+    } catch {
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: "Failed to load categories.",
+      });
+    }
+  }),
+
+  createCategory: publicProcedure
+    .input(
+      z.object({
+        name: categoryNameSchema,
+      })
+    )
+    .output(categorySchema)
+    .mutation(async ({ input }) => {
+      try {
+        return await createCategory({
+          name: input.name,
+        });
+      } catch (error) {
+        if (isUniqueConstraintError(error)) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "A category with this name already exists.",
+          });
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to create category.",
+        });
+      }
+    }),
+
+  updateCategory: publicProcedure
+    .input(
+      z.object({
+        categoryId: accountIdSchema,
+        name: categoryNameSchema,
+      })
+    )
+    .output(categorySchema)
+    .mutation(async ({ input }) => {
+      try {
+        const updated = await updateCategory(input.categoryId, {
+          name: input.name,
+        });
+
+        if (!updated) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Category was not found.",
+          });
+        }
+
+        return updated;
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        if (isUniqueConstraintError(error)) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "A category with this name already exists.",
+          });
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to update category.",
+        });
+      }
+    }),
+
+  deleteCategory: publicProcedure
+    .input(
+      z.object({
+        categoryId: accountIdSchema,
+      })
+    )
+    .output(
+      z.object({
+        categoryId: accountIdSchema,
+        deleted: z.literal(true),
+      })
+    )
+    .mutation(async ({ input }) => {
+      try {
+        const deleted = await deleteCategory(input.categoryId);
+        if (!deleted) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Category was not found.",
+          });
+        }
+
+        return {
+          categoryId: input.categoryId,
+          deleted: true as const,
+        };
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to delete category.",
         });
       }
     }),
@@ -658,7 +788,7 @@ export const accountsRouter = createTRPCRouter({
         currency: z.string().trim().min(1).max(16),
         direction: z.enum(["in", "out"]),
         description: z.string().trim().min(1).max(500),
-        categoryHint: z.string().trim().max(120).nullish(),
+        categoryId: accountIdSchema.nullish(),
         counterparty: z.string().trim().max(300).nullish(),
         reference: z.string().trim().max(300).nullish(),
       })
@@ -678,7 +808,7 @@ export const accountsRouter = createTRPCRouter({
           currency: input.currency,
           direction: input.direction,
           description: input.description,
-          categoryHint: normalizeOptionalText(input.categoryHint),
+          categoryId: input.categoryId ?? undefined,
           counterparty: normalizeOptionalText(input.counterparty),
           reference: normalizeOptionalText(input.reference),
         });
@@ -716,7 +846,7 @@ export const accountsRouter = createTRPCRouter({
         currency: z.string().trim().min(1).max(16),
         direction: z.enum(["in", "out"]),
         description: z.string().trim().min(1).max(500),
-        categoryHint: z.string().trim().max(120).nullish(),
+        categoryId: accountIdSchema.nullish(),
         counterparty: z.string().trim().max(300).nullish(),
         reference: z.string().trim().max(300).nullish(),
       })
@@ -745,7 +875,7 @@ export const accountsRouter = createTRPCRouter({
           currency: input.currency,
           direction: input.direction,
           description: input.description,
-          categoryHint: normalizeOptionalText(input.categoryHint),
+          categoryId: input.categoryId ?? undefined,
           counterparty: normalizeOptionalText(input.counterparty),
           reference: normalizeOptionalText(input.reference),
         });

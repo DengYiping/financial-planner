@@ -12,6 +12,19 @@ export const accounts = sqliteTable("accounts", {
   createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
 });
 
+export const categories = sqliteTable(
+  "categories",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    name: text("name").notNull(),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+    updatedAt: text("updated_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+  },
+  (table) => ({
+    nameUnique: uniqueIndex("idx_categories_name_unique").on(table.name),
+  })
+);
+
 export const transactions = sqliteTable(
   "transactions",
   {
@@ -26,7 +39,7 @@ export const transactions = sqliteTable(
     currency: text("currency").notNull(),
     direction: text("direction", { enum: ["in", "out"] }).$type<TransactionDirection>().notNull(),
     description: text("description").notNull(),
-    categoryHint: text("category_hint"),
+    categoryId: integer("category_id").references(() => categories.id, { onDelete: "set null" }),
     counterparty: text("counterparty"),
     reference: text("reference"),
     rawJson: text("raw_json").notNull(),
@@ -54,7 +67,9 @@ export const transactionRules = sqliteTable(
     amountMaxCents: integer("amount_max_cents"),
     amountExactCents: integer("amount_exact_cents"),
     accountIdsJson: text("account_ids_json"),
-    applyCategory: text("apply_category"),
+    applyCategoryId: integer("apply_category_id").references(() => categories.id, {
+      onDelete: "set null",
+    }),
     assignCounterpartyFromRegexGroup: integer("assign_counterparty_from_regex_group", {
       mode: "boolean",
     })
@@ -70,5 +85,6 @@ export const transactionRules = sqliteTable(
 );
 
 export type AccountRow = typeof accounts.$inferSelect;
+export type CategoryRow = typeof categories.$inferSelect;
 export type TransactionRow = typeof transactions.$inferSelect;
 export type TransactionRuleRow = typeof transactionRules.$inferSelect;

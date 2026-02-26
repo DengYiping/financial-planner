@@ -3,6 +3,7 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NormalizedTransaction, StatementProvider } from "@/lib/parsers/types";
 import {
   accounts,
+  categories,
   transactionRules as transactionRulesTable,
   transactions as transactionsTable,
 } from "@/lib/server/db/schema";
@@ -103,7 +104,7 @@ export type CreateTransactionForAccountInput = {
   currency: string;
   direction: "in" | "out";
   description: string;
-  categoryHint?: string;
+  categoryId?: number;
   counterparty?: string;
   reference?: string;
 };
@@ -118,7 +119,7 @@ export type UpdateTransactionForAccountInput = {
   currency: string;
   direction: "in" | "out";
   description: string;
-  categoryHint?: string;
+  categoryId?: number;
   counterparty?: string;
   reference?: string;
 };
@@ -126,6 +127,18 @@ export type UpdateTransactionForAccountInput = {
 export type CreateTransactionRuleInput = TransactionRuleWriteInput;
 export type UpdateTransactionRuleInput = TransactionRuleWriteInput;
 export type { TransactionRuleRecord };
+export type CategoryRecord = {
+  id: number;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+};
+export type CreateCategoryInput = {
+  name: string;
+};
+export type UpdateCategoryInput = {
+  name: string;
+};
 export type ReapplyTransactionRulesResult = {
   totalCount: number;
   updatedCount: number;
@@ -178,7 +191,7 @@ function toRulePersistenceValues(input: ValidatedTransactionRuleWriteInput): {
   amountMaxCents: number | null;
   amountExactCents: number | null;
   accountIdsJson: string | null;
-  applyCategory: string | null;
+  applyCategoryId: number | null;
   assignCounterpartyFromRegexGroup: boolean;
   priority: number;
 } {
@@ -189,7 +202,7 @@ function toRulePersistenceValues(input: ValidatedTransactionRuleWriteInput): {
     amountMaxCents: input.amountMaxCents ?? null,
     amountExactCents: input.amountExactCents ?? null,
     accountIdsJson: input.accountIds ? JSON.stringify(input.accountIds) : null,
-    applyCategory: input.applyCategory ?? null,
+    applyCategoryId: input.applyCategoryId ?? null,
     assignCounterpartyFromRegexGroup: input.assignCounterpartyFromRegexGroup,
     priority: input.priority,
   };
@@ -271,12 +284,14 @@ async function listTransactionsForAccounts(accountIds: number[]): Promise<Map<nu
       currency: transactionsTable.currency,
       direction: transactionsTable.direction,
       description: transactionsTable.description,
-      categoryHint: transactionsTable.categoryHint,
+      categoryId: transactionsTable.categoryId,
+      categoryName: categories.name,
       counterparty: transactionsTable.counterparty,
       reference: transactionsTable.reference,
       rawJson: transactionsTable.rawJson,
     })
     .from(transactionsTable)
+    .leftJoin(categories, eq(categories.id, transactionsTable.categoryId))
     .where(inArray(transactionsTable.accountId, accountIds))
     .orderBy(desc(transactionsTable.bookingDate), asc(transactionsTable.sourceId));
 
@@ -291,7 +306,8 @@ async function listTransactionsForAccounts(accountIds: number[]): Promise<Map<nu
       currency: row.currency,
       direction: row.direction === "out" ? ("out" as const) : ("in" as const),
       description: row.description,
-      categoryHint: row.categoryHint ?? undefined,
+      categoryId: row.categoryId ?? undefined,
+      categoryHint: row.categoryName ?? undefined,
       counterparty: row.counterparty ?? undefined,
       reference: row.reference ?? undefined,
       raw: parseRawJson(row.rawJson),
@@ -409,7 +425,8 @@ export async function getDashboardTransactionsView(
     currency: transactionsTable.currency,
     direction: transactionsTable.direction,
     description: transactionsTable.description,
-    categoryHint: transactionsTable.categoryHint,
+    categoryId: transactionsTable.categoryId,
+    categoryName: categories.name,
     counterparty: transactionsTable.counterparty,
     reference: transactionsTable.reference,
     rawJson: transactionsTable.rawJson,
@@ -418,7 +435,8 @@ export async function getDashboardTransactionsView(
   const baseQuery = db
     .select(transactionSelection)
     .from(transactionsTable)
-    .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId));
+    .innerJoin(accounts, eq(accounts.id, transactionsTable.accountId))
+    .leftJoin(categories, eq(categories.id, transactionsTable.categoryId));
   const scopedQuery = monthWhereClause ? baseQuery.where(monthWhereClause) : baseQuery;
   const rows = await scopedQuery.orderBy(asc(transactionsTable.bookingDate), asc(transactionsTable.sourceId));
 
@@ -432,7 +450,8 @@ export async function getDashboardTransactionsView(
       currency: row.currency,
       direction: row.direction === "out" ? "out" : "in",
       description: row.description,
-      categoryHint: row.categoryHint ?? undefined,
+      categoryId: row.categoryId ?? undefined,
+      categoryHint: row.categoryName ?? undefined,
       counterparty: row.counterparty ?? undefined,
       reference: row.reference ?? undefined,
       raw: parseRawJson(row.rawJson),
@@ -615,27 +634,157 @@ export async function deleteAccountById(accountId: number): Promise<boolean> {
   return true;
 }
 
+function toCategoryRecord(row: typeof categories.$inferSelect): CategoryRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+async function getCategoryByIdInternal(categoryId: number): Promise<CategoryRecord | null> {
+  const db = getFinanceDb();
+  const rows = await db.select().from(categories).where(eq(categories.id, categoryId)).limit(1);
+  const row = rows[0];
+  return row ? toCategoryRecord(row) : null;
+}
+
+export async function listCategories(): Promise<CategoryRecord[]> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+  const rows = await db.select().from(categories).orderBy(asc(categories.name), asc(categories.id));
+  return rows.map(toCategoryRecord);
+}
+
+export async function createCategory(input: CreateCategoryInput): Promise<CategoryRecord> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+  const inserted = await db
+    .insert(categories)
+    .values({
+      name: input.name,
+    })
+    .returning({
+      id: categories.id,
+    });
+
+  const insertedId = inserted[0]?.id;
+  if (typeof insertedId !== "number") {
+    throw new Error("Category insert succeeded but category id was not returned.");
+  }
+
+  const category = await getCategoryByIdInternal(insertedId);
+  if (!category) {
+    throw new Error("Category insert succeeded but category could not be loaded.");
+  }
+
+  return category;
+}
+
+export async function updateCategory(categoryId: number, input: UpdateCategoryInput): Promise<CategoryRecord | null> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+
+  const updated = await db
+    .update(categories)
+    .set({
+      name: input.name,
+      updatedAt: sql`(CURRENT_TIMESTAMP)`,
+    })
+    .where(eq(categories.id, categoryId))
+    .returning({
+      id: categories.id,
+    });
+
+  if (updated.length === 0) {
+    return null;
+  }
+
+  return getCategoryByIdInternal(categoryId);
+}
+
+export async function deleteCategory(categoryId: number): Promise<boolean> {
+  await ensureFinanceSchema();
+  const db = getFinanceDb();
+
+  const existing = await db
+    .select({
+      id: categories.id,
+    })
+    .from(categories)
+    .where(eq(categories.id, categoryId))
+    .limit(1);
+
+  if (existing.length === 0) {
+    return false;
+  }
+
+  await db.delete(categories).where(eq(categories.id, categoryId));
+  return true;
+}
+
 async function getTransactionRuleByIdInternal(ruleId: number): Promise<TransactionRuleRecord | null> {
   const db = getFinanceDb();
   const rows = await db
-    .select()
+    .select({
+      id: transactionRulesTable.id,
+      descriptionContains: transactionRulesTable.descriptionContains,
+      descriptionRegex: transactionRulesTable.descriptionRegex,
+      amountMinCents: transactionRulesTable.amountMinCents,
+      amountMaxCents: transactionRulesTable.amountMaxCents,
+      amountExactCents: transactionRulesTable.amountExactCents,
+      accountIdsJson: transactionRulesTable.accountIdsJson,
+      applyCategoryId: transactionRulesTable.applyCategoryId,
+      assignCounterpartyFromRegexGroup: transactionRulesTable.assignCounterpartyFromRegexGroup,
+      priority: transactionRulesTable.priority,
+      createdAt: transactionRulesTable.createdAt,
+      updatedAt: transactionRulesTable.updatedAt,
+      applyCategoryName: categories.name,
+    })
     .from(transactionRulesTable)
+    .leftJoin(categories, eq(categories.id, transactionRulesTable.applyCategoryId))
     .where(eq(transactionRulesTable.id, ruleId))
     .limit(1);
 
   const row = rows[0];
-  return row ? mapTransactionRuleRow(row) : null;
+  if (!row) {
+    return null;
+  }
+
+  return {
+    ...mapTransactionRuleRow(row),
+    applyCategoryName: row.applyCategoryName ?? undefined,
+  };
 }
 
 export async function listTransactionRules(): Promise<TransactionRuleRecord[]> {
   await ensureFinanceSchema();
   const db = getFinanceDb();
   const rows = await db
-    .select()
+    .select({
+      id: transactionRulesTable.id,
+      descriptionContains: transactionRulesTable.descriptionContains,
+      descriptionRegex: transactionRulesTable.descriptionRegex,
+      amountMinCents: transactionRulesTable.amountMinCents,
+      amountMaxCents: transactionRulesTable.amountMaxCents,
+      amountExactCents: transactionRulesTable.amountExactCents,
+      accountIdsJson: transactionRulesTable.accountIdsJson,
+      applyCategoryId: transactionRulesTable.applyCategoryId,
+      assignCounterpartyFromRegexGroup: transactionRulesTable.assignCounterpartyFromRegexGroup,
+      priority: transactionRulesTable.priority,
+      createdAt: transactionRulesTable.createdAt,
+      updatedAt: transactionRulesTable.updatedAt,
+      applyCategoryName: categories.name,
+    })
     .from(transactionRulesTable)
+    .leftJoin(categories, eq(categories.id, transactionRulesTable.applyCategoryId))
     .orderBy(asc(transactionRulesTable.priority), asc(transactionRulesTable.id));
 
-  return rows.map((row) => mapTransactionRuleRow(row));
+  return rows.map((row) => ({
+    ...mapTransactionRuleRow(row),
+    applyCategoryName: row.applyCategoryName ?? undefined,
+  }));
 }
 
 export async function createTransactionRule(
@@ -722,7 +871,7 @@ export async function reapplyTransactionRulesForAllTransactions(): Promise<Reapp
       accountId: transactionsTable.accountId,
       description: transactionsTable.description,
       amountCents: transactionsTable.amountCents,
-      categoryHint: transactionsTable.categoryHint,
+      categoryId: transactionsTable.categoryId,
       counterparty: transactionsTable.counterparty,
     })
     .from(transactionsTable);
@@ -742,21 +891,22 @@ export async function reapplyTransactionRulesForAllTransactions(): Promise<Reapp
       accountId: row.accountId,
       description: row.description,
       amountCents,
+      categoryId: row.categoryId ?? undefined,
     });
 
-    const nextCategoryHint = automationResult.categoryHint ?? null;
+    const nextCategoryId = automationResult.categoryId ?? null;
     const nextCounterparty = automationResult.counterparty ?? null;
-    const currentCategoryHint = row.categoryHint ?? null;
+    const currentCategoryId = row.categoryId ?? null;
     const currentCounterparty = row.counterparty ?? null;
 
-    if (currentCategoryHint === nextCategoryHint && currentCounterparty === nextCounterparty) {
+    if (currentCategoryId === nextCategoryId && currentCounterparty === nextCounterparty) {
       continue;
     }
 
     await db
       .update(transactionsTable)
       .set({
-        categoryHint: nextCategoryHint,
+        categoryId: nextCategoryId,
         counterparty: nextCounterparty,
       })
       .where(eq(transactionsTable.id, row.id));
@@ -814,6 +964,7 @@ export async function importTransactionsForAccount(
           accountId,
           description: transaction.description,
           amountCents,
+          categoryId: transaction.categoryId,
         });
 
         return {
@@ -825,7 +976,7 @@ export async function importTransactionsForAccount(
           currency: transaction.currency,
           direction: transaction.direction,
           description: transaction.description,
-          categoryHint: automationResult.categoryHint ?? null,
+          categoryId: automationResult.categoryId ?? null,
           counterparty: automationResult.counterparty ?? null,
           reference: transaction.reference ?? null,
           rawJson: JSON.stringify(transaction.raw),
@@ -858,7 +1009,7 @@ export async function createTransactionForAccount(
     accountId,
     description: input.description,
     amountCents,
-    categoryHint: input.categoryHint,
+    categoryId: input.categoryId,
     counterparty: input.counterparty,
   });
 
@@ -875,7 +1026,7 @@ export async function createTransactionForAccount(
         currency: input.currency,
         direction: input.direction,
         description: input.description,
-        categoryHint: automationResult.categoryHint ?? null,
+        categoryId: automationResult.categoryId ?? null,
         counterparty: automationResult.counterparty ?? null,
         reference: input.reference ?? null,
         rawJson: JSON.stringify({
@@ -934,7 +1085,7 @@ export async function updateTransactionForAccount(
     accountId,
     description: input.description,
     amountCents,
-    categoryHint: input.categoryHint,
+    categoryId: input.categoryId,
     counterparty: input.counterparty,
   });
 
@@ -958,7 +1109,7 @@ export async function updateTransactionForAccount(
       currency: input.currency,
       direction: input.direction,
       description: input.description,
-      categoryHint: automationResult.categoryHint ?? null,
+      categoryId: automationResult.categoryId ?? null,
       counterparty: automationResult.counterparty ?? null,
       reference: input.reference ?? null,
     })

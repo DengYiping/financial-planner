@@ -26,6 +26,7 @@ type RouterOutputs = inferRouterOutputs<AppRouter>;
 type TransactionsView = RouterOutputs["accounts"]["transactionsView"];
 type TransactionRow = TransactionsView["transactions"][number];
 type PersistedAccount = RouterOutputs["accounts"]["list"][number];
+type PersistedCategory = RouterOutputs["accounts"]["listCategories"][number];
 
 type TransactionsContentProps = {
   view: TransactionsView;
@@ -40,7 +41,7 @@ type EditableTransactionDraft = {
   direction: "in" | "out";
   currency: string;
   description: string;
-  categoryHint: string;
+  categoryId: string;
   counterparty: string;
   reference: string;
 };
@@ -57,7 +58,7 @@ type RuleFromTransactionDraft = {
   amountMin: string;
   amountMax: string;
   accountIds: number[];
-  applyCategory: string;
+  applyCategoryId: string;
   assignCounterpartyFromRegexGroup: boolean;
   priority: string;
 };
@@ -74,6 +75,11 @@ type AccountChoice = {
   name: string;
   color: string;
   currency?: string;
+};
+
+type CategoryChoice = {
+  id: number;
+  name: string;
 };
 
 const BOOKING_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -131,7 +137,7 @@ function toEditableTransactionDraft(row: TransactionRow): EditableTransactionDra
     direction: row.transaction.direction,
     currency: row.transaction.currency,
     description: row.transaction.description,
-    categoryHint: row.transaction.categoryHint ?? "",
+    categoryId: typeof row.transaction.categoryId === "number" ? String(row.transaction.categoryId) : "",
     counterparty: row.transaction.counterparty ?? "",
     reference: row.transaction.reference ?? "",
   };
@@ -150,7 +156,7 @@ function toCreateTransactionDraft(account: AccountChoice | undefined, fallbackCu
     direction: "out",
     currency: account?.currency ?? fallbackCurrency,
     description: "",
-    categoryHint: "",
+    categoryId: "",
     counterparty: "",
     reference: "",
   };
@@ -164,7 +170,7 @@ function toCreateRuleDraftFromTransaction(draft: EditableTransactionDraft): Rule
     amountMin: "",
     amountMax: "",
     accountIds: [],
-    applyCategory: "",
+    applyCategoryId: "",
     assignCounterpartyFromRegexGroup: false,
     priority: RULE_DEFAULT_PRIORITY,
   };
@@ -228,7 +234,9 @@ function parseCreateRulePayload(draft: RuleFromTransactionDraft): ParseCreateRul
     };
   }
 
-  const applyCategory = draft.applyCategory.trim();
+  const parsedCategoryId = Number.parseInt(draft.applyCategoryId, 10);
+  const applyCategoryId =
+    Number.isInteger(parsedCategoryId) && parsedCategoryId > 0 ? parsedCategoryId : undefined;
   const accountIds = Array.from(
     new Set(draft.accountIds.filter((accountId) => Number.isInteger(accountId) && accountId > 0))
   ).sort((left, right) => left - right);
@@ -244,7 +252,7 @@ function parseCreateRulePayload(draft: RuleFromTransactionDraft): ParseCreateRul
     return { ok: false, message: "At least one condition is required." };
   }
 
-  const hasAction = applyCategory.length > 0 || draft.assignCounterpartyFromRegexGroup;
+  const hasAction = typeof applyCategoryId === "number" || draft.assignCounterpartyFromRegexGroup;
   if (!hasAction) {
     return { ok: false, message: "At least one action is required." };
   }
@@ -258,7 +266,7 @@ function parseCreateRulePayload(draft: RuleFromTransactionDraft): ParseCreateRul
       amountMinCents,
       amountMaxCents,
       accountIds: accountIds.length > 0 ? accountIds : undefined,
-      applyCategory: applyCategory.length > 0 ? applyCategory : undefined,
+      applyCategoryId,
       assignCounterpartyFromRegexGroup: draft.assignCounterpartyFromRegexGroup,
       priority: parsedPriority,
     },
@@ -281,6 +289,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
   const [ruleError, setRuleError] = useState<string | null>(null);
   const [ruleNotice, setRuleNotice] = useState<string | null>(null);
   const accountsQuery = trpc.accounts.list.useQuery();
+  const categoriesQuery = trpc.accounts.listCategories.useQuery();
   const createTransactionMutation = trpc.accounts.createTransaction.useMutation();
   const deleteTransactionMutation = trpc.accounts.deleteTransaction.useMutation();
   const createRuleMutation = trpc.accounts.createRule.useMutation();
@@ -538,7 +547,8 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     const amountCents = amountInputToCents(draft.amount);
     const currency = draft.currency.trim();
     const description = draft.description.trim();
-    const categoryHint = draft.categoryHint.trim();
+    const parsedCategoryId = Number.parseInt(draft.categoryId, 10);
+    const categoryId = Number.isInteger(parsedCategoryId) && parsedCategoryId > 0 ? parsedCategoryId : undefined;
     const counterparty = draft.counterparty.trim();
     const reference = draft.reference.trim();
 
@@ -578,7 +588,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
           currency,
           direction: draft.direction,
           description,
-          categoryHint: categoryHint.length > 0 ? categoryHint : undefined,
+          categoryId,
           counterparty: counterparty.length > 0 ? counterparty : undefined,
           reference: reference.length > 0 ? reference : undefined,
         });
@@ -596,7 +606,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
           currency,
           direction: draft.direction,
           description,
-          categoryHint: categoryHint.length > 0 ? categoryHint : undefined,
+          categoryId,
           counterparty: counterparty.length > 0 ? counterparty : undefined,
           reference: reference.length > 0 ? reference : undefined,
         });
@@ -703,6 +713,15 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
   const accountOptions = useMemo(() => {
     return accountChoices.map((account) => account.name);
   }, [accountChoices]);
+
+  const categoryChoices = useMemo<CategoryChoice[]>(() => {
+    return (categoriesQuery.data ?? [])
+      .map((category: PersistedCategory) => ({
+        id: category.id,
+        name: category.name,
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }, [categoriesQuery.data]);
 
   const accountColorByName = useMemo(() => {
     const colors = new Map<string, string>();
@@ -1364,15 +1383,20 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                     <div className="grid gap-3 sm:grid-cols-2">
                       <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
                         Category
-                        <input
-                          type="text"
-                          value={transactionModal.draft.categoryHint}
+                        <select
+                          value={transactionModal.draft.categoryId}
                           onChange={(event) => {
-                            updateEditingField("categoryHint", event.target.value);
+                            updateEditingField("categoryId", event.target.value);
                           }}
-                          maxLength={120}
                           className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
-                        />
+                        >
+                          <option value="">Uncategorized</option>
+                          {categoryChoices.map((category) => (
+                            <option key={category.id} value={String(category.id)}>
+                              {category.name}
+                            </option>
+                          ))}
+                        </select>
                       </label>
                       <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
                         Counterparty
@@ -1625,15 +1649,20 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                     <div className="grid gap-3 sm:grid-cols-2">
                       <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
                         Apply Category
-                        <input
-                          type="text"
-                          value={ruleModal.draft.applyCategory}
+                        <select
+                          value={ruleModal.draft.applyCategoryId}
                           onChange={(event) => {
-                            updateRuleField("applyCategory", event.target.value);
+                            updateRuleField("applyCategoryId", event.target.value);
                           }}
-                          maxLength={120}
                           className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
-                        />
+                        >
+                          <option value="">None</option>
+                          {categoryChoices.map((category) => (
+                            <option key={category.id} value={String(category.id)}>
+                              {category.name}
+                            </option>
+                          ))}
+                        </select>
                       </label>
                       <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
                         Priority
