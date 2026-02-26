@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 import type { StatementProvider, TransactionDirection } from "../../parsers/types";
 
@@ -22,6 +22,19 @@ export const categories = sqliteTable(
   },
   (table) => ({
     nameUnique: uniqueIndex("idx_categories_name_unique").on(table.name),
+  })
+);
+
+export const tags = sqliteTable(
+  "tags",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    name: text("name").notNull(),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+    updatedAt: text("updated_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+  },
+  (table) => ({
+    nameUnique: uniqueIndex("idx_tags_name_unique").on(table.name),
   })
 );
 
@@ -57,6 +70,26 @@ export const transactions = sqliteTable(
   })
 );
 
+export const transactionTags = sqliteTable(
+  "transaction_tags",
+  {
+    transactionId: integer("transaction_id")
+      .notNull()
+      .references(() => transactions.id, { onDelete: "cascade" }),
+    tagId: integer("tag_id")
+      .notNull()
+      .references(() => tags.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+  },
+  (table) => ({
+    pk: primaryKey({
+      columns: [table.transactionId, table.tagId],
+      name: "transaction_tags_pk",
+    }),
+    tagIdIdx: index("idx_transaction_tags_tag_id").on(table.tagId),
+  })
+);
+
 export const transactionRules = sqliteTable(
   "transaction_rules",
   {
@@ -84,7 +117,30 @@ export const transactionRules = sqliteTable(
   })
 );
 
+export const transactionRuleTags = sqliteTable(
+  "transaction_rule_tags",
+  {
+    transactionRuleId: integer("transaction_rule_id")
+      .notNull()
+      .references(() => transactionRules.id, { onDelete: "cascade" }),
+    tagId: integer("tag_id")
+      .notNull()
+      .references(() => tags.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull().default(sql`(CURRENT_TIMESTAMP)`),
+  },
+  (table) => ({
+    pk: primaryKey({
+      columns: [table.transactionRuleId, table.tagId],
+      name: "transaction_rule_tags_pk",
+    }),
+    tagIdIdx: index("idx_transaction_rule_tags_tag_id").on(table.tagId),
+  })
+);
+
 export type AccountRow = typeof accounts.$inferSelect;
 export type CategoryRow = typeof categories.$inferSelect;
+export type TagRow = typeof tags.$inferSelect;
 export type TransactionRow = typeof transactions.$inferSelect;
+export type TransactionTagRow = typeof transactionTags.$inferSelect;
 export type TransactionRuleRow = typeof transactionRules.$inferSelect;
+export type TransactionRuleTagRow = typeof transactionRuleTags.$inferSelect;

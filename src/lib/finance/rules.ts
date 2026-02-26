@@ -15,6 +15,7 @@ export type TransactionRuleWriteInput = {
   amountExactCents?: number | null;
   accountIds?: number[] | null;
   applyCategoryId?: number | null;
+  applyTagIds?: number[] | null;
   assignCounterpartyFromRegexGroup?: boolean | null;
   priority: number;
 };
@@ -27,6 +28,7 @@ export type ValidatedTransactionRuleWriteInput = {
   amountExactCents?: number;
   accountIds?: number[];
   applyCategoryId?: number;
+  applyTagIds?: number[];
   assignCounterpartyFromRegexGroup: boolean;
   priority: number;
 };
@@ -41,6 +43,12 @@ export type TransactionRuleRecord = {
   accountIds?: number[];
   applyCategoryId?: number;
   applyCategoryName?: string;
+  applyTagIds?: number[];
+  applyTagNames?: string[];
+  applyTags?: Array<{
+    id: number;
+    name: string;
+  }>;
   assignCounterpartyFromRegexGroup: boolean;
   priority: number;
   createdAt: string;
@@ -56,11 +64,13 @@ export type RuleEvaluationInput = {
   description: string;
   amountCents: number;
   categoryId?: number;
+  tagIds?: number[];
   counterparty?: string;
 };
 
 export type RuleEvaluationResult = {
   categoryId?: number;
+  tagIds?: number[];
   counterparty?: string;
 };
 
@@ -107,22 +117,35 @@ function normalizeOptionalPositiveInteger(
   return value;
 }
 
-function normalizeAccountIds(value: number[] | null | undefined): number[] | undefined {
+function normalizePositiveIntegerSet(
+  value: number[] | null | undefined,
+  fieldName: string
+): number[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
   }
 
   const unique = new Set<number>();
-  value.forEach((accountId) => {
-    if (!Number.isInteger(accountId) || accountId <= 0) {
-      throw new TransactionRuleValidationError("accountIds must contain positive integer account ids.");
+  value.forEach((entry) => {
+    if (!Number.isInteger(entry) || entry <= 0) {
+      throw new TransactionRuleValidationError(
+        `${fieldName} must contain positive integer ${fieldName} values.`
+      );
     }
 
-    unique.add(accountId);
+    unique.add(entry);
   });
 
   const normalized = Array.from(unique.values()).sort((left, right) => left - right);
   return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeAccountIds(value: number[] | null | undefined): number[] | undefined {
+  return normalizePositiveIntegerSet(value, "accountIds");
+}
+
+function normalizeTagIds(value: number[] | null | undefined): number[] | undefined {
+  return normalizePositiveIntegerSet(value, "applyTagIds");
 }
 
 function compileDescriptionRegex(pattern: string): RegExp {
@@ -133,7 +156,7 @@ function compileDescriptionRegex(pattern: string): RegExp {
   }
 }
 
-function parseRuleAccountIdsJson(value: string | null): number[] | undefined {
+function parsePositiveIntegerSetJson(value: string | null): number[] | undefined {
   if (typeof value !== "string" || value.length === 0) {
     return undefined;
   }
@@ -155,6 +178,14 @@ function parseRuleAccountIdsJson(value: string | null): number[] | undefined {
   }
 }
 
+function normalizeInputTagIds(value: number[] | undefined): number[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) {
+    return undefined;
+  }
+
+  return normalizePositiveIntegerSet(value, "tagIds");
+}
+
 export function mapTransactionRuleRow(row: TransactionRuleRow): TransactionRuleRecord {
   return {
     id: row.id,
@@ -163,7 +194,7 @@ export function mapTransactionRuleRow(row: TransactionRuleRow): TransactionRuleR
     amountMinCents: typeof row.amountMinCents === "number" ? row.amountMinCents : undefined,
     amountMaxCents: typeof row.amountMaxCents === "number" ? row.amountMaxCents : undefined,
     amountExactCents: typeof row.amountExactCents === "number" ? row.amountExactCents : undefined,
-    accountIds: parseRuleAccountIdsJson(row.accountIdsJson),
+    accountIds: parsePositiveIntegerSetJson(row.accountIdsJson),
     applyCategoryId: typeof row.applyCategoryId === "number" ? row.applyCategoryId : undefined,
     assignCounterpartyFromRegexGroup: row.assignCounterpartyFromRegexGroup,
     priority: row.priority,
@@ -182,6 +213,7 @@ export function validateAndNormalizeTransactionRuleInput(
   const amountExactCents = normalizeOptionalInteger(input.amountExactCents, "amountExactCents");
   const accountIds = normalizeAccountIds(input.accountIds);
   const applyCategoryId = normalizeOptionalPositiveInteger(input.applyCategoryId, "applyCategoryId");
+  const applyTagIds = normalizeTagIds(input.applyTagIds);
   const assignCounterpartyFromRegexGroup = input.assignCounterpartyFromRegexGroup === true;
 
   if (!Number.isInteger(input.priority)) {
@@ -234,7 +266,10 @@ export function validateAndNormalizeTransactionRuleInput(
     throw new TransactionRuleValidationError("At least one condition is required.");
   }
 
-  const hasAction = typeof applyCategoryId === "number" || assignCounterpartyFromRegexGroup;
+  const hasAction =
+    typeof applyCategoryId === "number" ||
+    (Array.isArray(applyTagIds) && applyTagIds.length > 0) ||
+    assignCounterpartyFromRegexGroup;
   if (!hasAction) {
     throw new TransactionRuleValidationError("At least one action is required.");
   }
@@ -247,6 +282,7 @@ export function validateAndNormalizeTransactionRuleInput(
     amountExactCents,
     accountIds,
     applyCategoryId,
+    applyTagIds,
     assignCounterpartyFromRegexGroup,
     priority: input.priority,
   };
@@ -340,6 +376,7 @@ export function applyPreparedTransactionRules(
   input: RuleEvaluationInput
 ): RuleEvaluationResult {
   let categoryId = normalizeOptionalPositiveInteger(input.categoryId, "categoryId");
+  const tagIdSet = new Set<number>(normalizeInputTagIds(input.tagIds) ?? []);
   let counterparty = normalizeOptionalText(input.counterparty);
 
   rules.forEach((rule) => {
@@ -357,6 +394,12 @@ export function applyPreparedTransactionRules(
       categoryId = rule.applyCategoryId;
     }
 
+    if (Array.isArray(rule.applyTagIds)) {
+      rule.applyTagIds.forEach((tagId) => {
+        tagIdSet.add(tagId);
+      });
+    }
+
     if (
       rule.assignCounterpartyFromRegexGroup &&
       match.regexMatch &&
@@ -371,6 +414,7 @@ export function applyPreparedTransactionRules(
 
   return {
     categoryId,
+    tagIds: tagIdSet.size > 0 ? Array.from(tagIdSet.values()).sort((left, right) => left - right) : undefined,
     counterparty,
   };
 }

@@ -4,10 +4,13 @@ import type { NormalizedTransaction, StatementProvider } from "@/lib/parsers/typ
 import {
   accounts,
   categories,
+  tags,
+  transactionRuleTags as transactionRuleTagsTable,
   transactionRules as transactionRulesTable,
+  transactionTags as transactionTagsTable,
   transactions as transactionsTable,
 } from "@/lib/server/db/schema";
-import { ensureFinanceSchema, getFinanceDb } from "@/lib/server/turso";
+import { getFinanceDb } from "@/lib/server/turso";
 import {
   applyPreparedTransactionRules,
   mapTransactionRuleRow,
@@ -105,6 +108,7 @@ export type CreateTransactionForAccountInput = {
   direction: "in" | "out";
   description: string;
   categoryId?: number;
+  tagIds?: number[];
   counterparty?: string;
   reference?: string;
 };
@@ -120,6 +124,7 @@ export type UpdateTransactionForAccountInput = {
   direction: "in" | "out";
   description: string;
   categoryId?: number;
+  tagIds?: number[];
   counterparty?: string;
   reference?: string;
 };
@@ -133,10 +138,22 @@ export type CategoryRecord = {
   createdAt: string;
   updatedAt: string;
 };
+export type TagRecord = {
+  id: number;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+};
 export type CreateCategoryInput = {
   name: string;
 };
 export type UpdateCategoryInput = {
+  name: string;
+};
+export type CreateTagInput = {
+  name: string;
+};
+export type UpdateTagInput = {
   name: string;
 };
 export type ReapplyTransactionRulesResult = {
@@ -208,13 +225,244 @@ function toRulePersistenceValues(input: ValidatedTransactionRuleWriteInput): {
   };
 }
 
+function normalizeTagIds(input: number[] | null | undefined): number[] {
+  if (!Array.isArray(input) || input.length === 0) {
+    return [];
+  }
+
+  const unique = new Set<number>();
+  input.forEach((tagId) => {
+    if (!Number.isInteger(tagId) || tagId <= 0) {
+      throw new Error("tagIds must contain positive integer tag ids.");
+    }
+
+    unique.add(tagId);
+  });
+
+  return Array.from(unique.values()).sort((left, right) => left - right);
+}
+
+type TagList = {
+  tagIds: number[];
+  tagNames: string[];
+  tags: Array<{
+    id: number;
+    name: string;
+  }>;
+};
+
+async function listTransactionTagLists(transactionIds: number[]): Promise<Map<number, TagList>> {
+  if (transactionIds.length === 0) {
+    return new Map();
+  }
+
+  const db = getFinanceDb();
+  const rows = await db
+    .select({
+      transactionId: transactionTagsTable.transactionId,
+      tagId: transactionTagsTable.tagId,
+      tagName: tags.name,
+    })
+    .from(transactionTagsTable)
+    .innerJoin(tags, eq(tags.id, transactionTagsTable.tagId))
+    .where(inArray(transactionTagsTable.transactionId, transactionIds))
+    .orderBy(
+      asc(transactionTagsTable.transactionId),
+      asc(tags.name),
+      asc(transactionTagsTable.tagId)
+    );
+
+  const tagsByTransactionId = new Map<number, TagList>();
+  rows.forEach((row) => {
+    const existing = tagsByTransactionId.get(row.transactionId);
+    if (existing) {
+      existing.tagIds.push(row.tagId);
+      existing.tagNames.push(row.tagName);
+      existing.tags.push({
+        id: row.tagId,
+        name: row.tagName,
+      });
+      return;
+    }
+
+    tagsByTransactionId.set(row.transactionId, {
+      tagIds: [row.tagId],
+      tagNames: [row.tagName],
+      tags: [
+        {
+          id: row.tagId,
+          name: row.tagName,
+        },
+      ],
+    });
+  });
+
+  return tagsByTransactionId;
+}
+
+async function listTransactionRuleTagLists(ruleIds: number[]): Promise<Map<number, TagList>> {
+  if (ruleIds.length === 0) {
+    return new Map();
+  }
+
+  const db = getFinanceDb();
+  const rows = await db
+    .select({
+      transactionRuleId: transactionRuleTagsTable.transactionRuleId,
+      tagId: transactionRuleTagsTable.tagId,
+      tagName: tags.name,
+    })
+    .from(transactionRuleTagsTable)
+    .innerJoin(tags, eq(tags.id, transactionRuleTagsTable.tagId))
+    .where(inArray(transactionRuleTagsTable.transactionRuleId, ruleIds))
+    .orderBy(
+      asc(transactionRuleTagsTable.transactionRuleId),
+      asc(tags.name),
+      asc(transactionRuleTagsTable.tagId)
+    );
+
+  const tagsByRuleId = new Map<number, TagList>();
+  rows.forEach((row) => {
+    const existing = tagsByRuleId.get(row.transactionRuleId);
+    if (existing) {
+      existing.tagIds.push(row.tagId);
+      existing.tagNames.push(row.tagName);
+      existing.tags.push({
+        id: row.tagId,
+        name: row.tagName,
+      });
+      return;
+    }
+
+    tagsByRuleId.set(row.transactionRuleId, {
+      tagIds: [row.tagId],
+      tagNames: [row.tagName],
+      tags: [
+        {
+          id: row.tagId,
+          name: row.tagName,
+        },
+      ],
+    });
+  });
+
+  return tagsByRuleId;
+}
+
+async function addTransactionTags(transactionId: number, tagIds: number[]): Promise<void> {
+  const normalizedTagIds = normalizeTagIds(tagIds);
+  if (normalizedTagIds.length === 0) {
+    return;
+  }
+
+  const db = getFinanceDb();
+  await db
+    .insert(transactionTagsTable)
+    .values(
+      normalizedTagIds.map((tagId) => ({
+        transactionId,
+        tagId,
+      }))
+    )
+    .onConflictDoNothing({
+      target: [transactionTagsTable.transactionId, transactionTagsTable.tagId],
+    });
+}
+
+async function replaceTransactionTags(transactionId: number, tagIds: number[]): Promise<void> {
+  const normalizedTagIds = normalizeTagIds(tagIds);
+  const db = getFinanceDb();
+
+  if (normalizedTagIds.length === 0) {
+    await db.delete(transactionTagsTable).where(eq(transactionTagsTable.transactionId, transactionId));
+    return;
+  }
+
+  const existingRows = await db
+    .select({
+      tagId: transactionTagsTable.tagId,
+    })
+    .from(transactionTagsTable)
+    .where(eq(transactionTagsTable.transactionId, transactionId));
+
+  const existingTagIds = existingRows.map((row) => row.tagId);
+  const normalizedTagIdSet = new Set(normalizedTagIds);
+  const existingTagIdSet = new Set(existingTagIds);
+  const toDelete = existingTagIds.filter((tagId) => !normalizedTagIdSet.has(tagId));
+  const toInsert = normalizedTagIds.filter((tagId) => !existingTagIdSet.has(tagId));
+
+  if (toDelete.length > 0) {
+    await db
+      .delete(transactionTagsTable)
+      .where(
+        and(
+          eq(transactionTagsTable.transactionId, transactionId),
+          inArray(transactionTagsTable.tagId, toDelete)
+        )
+      );
+  }
+
+  if (toInsert.length > 0) {
+    await db.insert(transactionTagsTable).values(
+      toInsert.map((tagId) => ({
+        transactionId,
+        tagId,
+      }))
+    );
+  }
+}
+
+async function replaceTransactionRuleTags(ruleId: number, tagIds: number[]): Promise<void> {
+  const normalizedTagIds = normalizeTagIds(tagIds);
+  const db = getFinanceDb();
+
+  if (normalizedTagIds.length === 0) {
+    await db
+      .delete(transactionRuleTagsTable)
+      .where(eq(transactionRuleTagsTable.transactionRuleId, ruleId));
+    return;
+  }
+
+  const existingRows = await db
+    .select({
+      tagId: transactionRuleTagsTable.tagId,
+    })
+    .from(transactionRuleTagsTable)
+    .where(eq(transactionRuleTagsTable.transactionRuleId, ruleId));
+
+  const existingTagIds = existingRows.map((row) => row.tagId);
+  const normalizedTagIdSet = new Set(normalizedTagIds);
+  const existingTagIdSet = new Set(existingTagIds);
+  const toDelete = existingTagIds.filter((tagId) => !normalizedTagIdSet.has(tagId));
+  const toInsert = normalizedTagIds.filter((tagId) => !existingTagIdSet.has(tagId));
+
+  if (toDelete.length > 0) {
+    await db
+      .delete(transactionRuleTagsTable)
+      .where(
+        and(
+          eq(transactionRuleTagsTable.transactionRuleId, ruleId),
+          inArray(transactionRuleTagsTable.tagId, toDelete)
+        )
+      );
+  }
+
+  if (toInsert.length > 0) {
+    await db.insert(transactionRuleTagsTable).values(
+      toInsert.map((tagId) => ({
+        transactionRuleId: ruleId,
+        tagId,
+      }))
+    );
+  }
+}
+
 async function getPreparedTransactionRules(): Promise<PreparedTransactionRule[]> {
   const rules = await listTransactionRules();
   return prepareTransactionRules(rules);
 }
 
 async function listAccountSummaries(accountId?: number): Promise<AccountSummaryRecord[]> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
 
   const baseSelection = {
@@ -276,6 +524,7 @@ async function listTransactionsForAccounts(accountIds: number[]): Promise<Map<nu
   const db = getFinanceDb();
   const rows = await db
     .select({
+      transactionPk: transactionsTable.id,
       accountId: transactionsTable.accountId,
       sourceId: transactionsTable.sourceId,
       provider: transactionsTable.provider,
@@ -295,9 +544,11 @@ async function listTransactionsForAccounts(accountIds: number[]): Promise<Map<nu
     .where(inArray(transactionsTable.accountId, accountIds))
     .orderBy(desc(transactionsTable.bookingDate), asc(transactionsTable.sourceId));
 
+  const transactionTagsById = await listTransactionTagLists(rows.map((row) => row.transactionPk));
   const transactionsByAccount = new Map<number, NormalizedTransaction[]>();
 
   rows.forEach((row) => {
+    const tagList = transactionTagsById.get(row.transactionPk);
     const transaction: NormalizedTransaction = {
       id: row.sourceId,
       provider: row.provider,
@@ -308,6 +559,9 @@ async function listTransactionsForAccounts(accountIds: number[]): Promise<Map<nu
       description: row.description,
       categoryId: row.categoryId ?? undefined,
       categoryHint: row.categoryName ?? undefined,
+      tags: tagList?.tags,
+      tagIds: tagList?.tagIds,
+      tagHints: tagList?.tagNames,
       counterparty: row.counterparty ?? undefined,
       reference: row.reference ?? undefined,
       raw: parseRawJson(row.rawJson),
@@ -382,7 +636,6 @@ export async function listAccounts(): Promise<AccountRecord[]> {
 export async function getDashboardTransactionsView(
   input: DashboardTransactionsViewInput
 ): Promise<DashboardTransactionsView> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
 
   const monthOptions = await listTransactionMonthOptions();
@@ -415,6 +668,7 @@ export async function getDashboardTransactionsView(
       : undefined;
 
   const transactionSelection = {
+    transactionPk: transactionsTable.id,
     accountId: accounts.id,
     accountName: accounts.name,
     accountColor: accounts.color,
@@ -439,9 +693,11 @@ export async function getDashboardTransactionsView(
     .leftJoin(categories, eq(categories.id, transactionsTable.categoryId));
   const scopedQuery = monthWhereClause ? baseQuery.where(monthWhereClause) : baseQuery;
   const rows = await scopedQuery.orderBy(asc(transactionsTable.bookingDate), asc(transactionsTable.sourceId));
+  const transactionTagsById = await listTransactionTagLists(rows.map((row) => row.transactionPk));
 
   const importedTransactionCount = await countImportedTransactions();
   const transactions: DashboardTransactionRow[] = rows.map((row) => {
+    const tagList = transactionTagsById.get(row.transactionPk);
     const transaction: NormalizedTransaction = {
       id: row.sourceId,
       provider: row.provider,
@@ -452,6 +708,9 @@ export async function getDashboardTransactionsView(
       description: row.description,
       categoryId: row.categoryId ?? undefined,
       categoryHint: row.categoryName ?? undefined,
+      tags: tagList?.tags,
+      tagIds: tagList?.tagIds,
+      tagHints: tagList?.tagNames,
       counterparty: row.counterparty ?? undefined,
       reference: row.reference ?? undefined,
       raw: parseRawJson(row.rawJson),
@@ -475,7 +734,6 @@ export async function getDashboardTransactionsView(
 }
 
 export async function getDashboardSummaryView(input: DashboardSummaryViewInput): Promise<DashboardSummaryView> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
 
   const monthOptions = await listTransactionMonthOptions();
@@ -583,7 +841,6 @@ export async function getAccountById(accountId: number): Promise<AccountRecord |
 }
 
 export async function createAccount(input: CreateAccountInput): Promise<AccountRecord> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
   const currency = input.currency ?? null;
 
@@ -615,7 +872,6 @@ export async function createAccount(input: CreateAccountInput): Promise<AccountR
 }
 
 export async function deleteAccountById(accountId: number): Promise<boolean> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
 
   const existing = await db
@@ -651,14 +907,12 @@ async function getCategoryByIdInternal(categoryId: number): Promise<CategoryReco
 }
 
 export async function listCategories(): Promise<CategoryRecord[]> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
   const rows = await db.select().from(categories).orderBy(asc(categories.name), asc(categories.id));
   return rows.map(toCategoryRecord);
 }
 
 export async function createCategory(input: CreateCategoryInput): Promise<CategoryRecord> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
   const inserted = await db
     .insert(categories)
@@ -683,7 +937,6 @@ export async function createCategory(input: CreateCategoryInput): Promise<Catego
 }
 
 export async function updateCategory(categoryId: number, input: UpdateCategoryInput): Promise<CategoryRecord | null> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
 
   const updated = await db
@@ -705,7 +958,6 @@ export async function updateCategory(categoryId: number, input: UpdateCategoryIn
 }
 
 export async function deleteCategory(categoryId: number): Promise<boolean> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
 
   const existing = await db
@@ -721,6 +973,92 @@ export async function deleteCategory(categoryId: number): Promise<boolean> {
   }
 
   await db.delete(categories).where(eq(categories.id, categoryId));
+  return true;
+}
+
+function toTagRecord(row: typeof tags.$inferSelect): TagRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+async function getTagByIdInternal(tagId: number): Promise<TagRecord | null> {
+  const db = getFinanceDb();
+  const rows = await db.select().from(tags).where(eq(tags.id, tagId)).limit(1);
+  const row = rows[0];
+  return row ? toTagRecord(row) : null;
+}
+
+export async function listTags(): Promise<TagRecord[]> {
+  const db = getFinanceDb();
+  const rows = await db.select().from(tags).orderBy(asc(tags.name), asc(tags.id));
+  return rows.map(toTagRecord);
+}
+
+export async function createTag(input: CreateTagInput): Promise<TagRecord> {
+  const db = getFinanceDb();
+  const inserted = await db
+    .insert(tags)
+    .values({
+      name: input.name,
+    })
+    .returning({
+      id: tags.id,
+    });
+
+  const insertedId = inserted[0]?.id;
+  if (typeof insertedId !== "number") {
+    throw new Error("Tag insert succeeded but tag id was not returned.");
+  }
+
+  const tag = await getTagByIdInternal(insertedId);
+  if (!tag) {
+    throw new Error("Tag insert succeeded but tag could not be loaded.");
+  }
+
+  return tag;
+}
+
+export async function updateTag(tagId: number, input: UpdateTagInput): Promise<TagRecord | null> {
+  const db = getFinanceDb();
+
+  const updated = await db
+    .update(tags)
+    .set({
+      name: input.name,
+      updatedAt: sql`(CURRENT_TIMESTAMP)`,
+    })
+    .where(eq(tags.id, tagId))
+    .returning({
+      id: tags.id,
+    });
+
+  if (updated.length === 0) {
+    return null;
+  }
+
+  return getTagByIdInternal(tagId);
+}
+
+export async function deleteTag(tagId: number): Promise<boolean> {
+  const db = getFinanceDb();
+
+  const existing = await db
+    .select({
+      id: tags.id,
+    })
+    .from(tags)
+    .where(eq(tags.id, tagId))
+    .limit(1);
+
+  if (existing.length === 0) {
+    return false;
+  }
+
+  await db.delete(tags).where(eq(tags.id, tagId));
   return true;
 }
 
@@ -752,14 +1090,18 @@ async function getTransactionRuleByIdInternal(ruleId: number): Promise<Transacti
     return null;
   }
 
+  const tagList = (await listTransactionRuleTagLists([row.id])).get(row.id);
+
   return {
     ...mapTransactionRuleRow(row),
     applyCategoryName: row.applyCategoryName ?? undefined,
+    applyTags: tagList?.tags,
+    applyTagIds: tagList?.tagIds,
+    applyTagNames: tagList?.tagNames,
   };
 }
 
 export async function listTransactionRules(): Promise<TransactionRuleRecord[]> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
   const rows = await db
     .select({
@@ -781,16 +1123,19 @@ export async function listTransactionRules(): Promise<TransactionRuleRecord[]> {
     .leftJoin(categories, eq(categories.id, transactionRulesTable.applyCategoryId))
     .orderBy(asc(transactionRulesTable.priority), asc(transactionRulesTable.id));
 
+  const tagsByRuleId = await listTransactionRuleTagLists(rows.map((row) => row.id));
   return rows.map((row) => ({
     ...mapTransactionRuleRow(row),
     applyCategoryName: row.applyCategoryName ?? undefined,
+    applyTags: tagsByRuleId.get(row.id)?.tags,
+    applyTagIds: tagsByRuleId.get(row.id)?.tagIds,
+    applyTagNames: tagsByRuleId.get(row.id)?.tagNames,
   }));
 }
 
 export async function createTransactionRule(
   input: CreateTransactionRuleInput
 ): Promise<TransactionRuleRecord> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
   const validatedInput = validateAndNormalizeTransactionRuleInput(input);
 
@@ -806,6 +1151,8 @@ export async function createTransactionRule(
     throw new Error("Rule insert succeeded but rule id was not returned.");
   }
 
+  await replaceTransactionRuleTags(insertedId, validatedInput.applyTagIds ?? []);
+
   const createdRule = await getTransactionRuleByIdInternal(insertedId);
   if (!createdRule) {
     throw new Error("Rule insert succeeded but rule could not be loaded.");
@@ -818,7 +1165,6 @@ export async function updateTransactionRule(
   ruleId: number,
   input: UpdateTransactionRuleInput
 ): Promise<TransactionRuleRecord | null> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
   const validatedInput = validateAndNormalizeTransactionRuleInput(input);
 
@@ -837,11 +1183,11 @@ export async function updateTransactionRule(
     return null;
   }
 
+  await replaceTransactionRuleTags(ruleId, validatedInput.applyTagIds ?? []);
   return getTransactionRuleByIdInternal(ruleId);
 }
 
 export async function deleteTransactionRule(ruleId: number): Promise<boolean> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
 
   const existing = await db
@@ -861,7 +1207,6 @@ export async function deleteTransactionRule(ruleId: number): Promise<boolean> {
 }
 
 export async function reapplyTransactionRulesForAllTransactions(): Promise<ReapplyTransactionRulesResult> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
   const preparedRules = await getPreparedTransactionRules();
 
@@ -883,35 +1228,47 @@ export async function reapplyTransactionRulesForAllTransactions(): Promise<Reapp
     };
   }
 
+  const transactionTagsById = await listTransactionTagLists(rows.map((row) => row.id));
   let updatedCount = 0;
 
   for (const row of rows) {
+    const currentTagIds = transactionTagsById.get(row.id)?.tagIds ?? [];
     const amountCents = Math.abs(Math.trunc(toNumberValue(row.amountCents)));
     const automationResult = applyPreparedTransactionRules(preparedRules, {
       accountId: row.accountId,
       description: row.description,
       amountCents,
       categoryId: row.categoryId ?? undefined,
+      tagIds: currentTagIds,
+      counterparty: row.counterparty ?? undefined,
     });
 
     const nextCategoryId = automationResult.categoryId ?? null;
+    const nextTagIds = normalizeTagIds(automationResult.tagIds);
     const nextCounterparty = automationResult.counterparty ?? null;
     const currentCategoryId = row.categoryId ?? null;
     const currentCounterparty = row.counterparty ?? null;
+    const currentTagIdSet = new Set(currentTagIds);
+    const tagsToAdd = nextTagIds.filter((tagId) => !currentTagIdSet.has(tagId));
+    const hasRowUpdate = currentCategoryId !== nextCategoryId || currentCounterparty !== nextCounterparty;
 
-    if (currentCategoryId === nextCategoryId && currentCounterparty === nextCounterparty) {
-      continue;
+    if (hasRowUpdate) {
+      await db
+        .update(transactionsTable)
+        .set({
+          categoryId: nextCategoryId,
+          counterparty: nextCounterparty,
+        })
+        .where(eq(transactionsTable.id, row.id));
     }
 
-    await db
-      .update(transactionsTable)
-      .set({
-        categoryId: nextCategoryId,
-        counterparty: nextCounterparty,
-      })
-      .where(eq(transactionsTable.id, row.id));
+    if (tagsToAdd.length > 0) {
+      await addTransactionTags(row.id, tagsToAdd);
+    }
 
-    updatedCount += 1;
+    if (hasRowUpdate || tagsToAdd.length > 0) {
+      updatedCount += 1;
+    }
   }
 
   return {
@@ -920,27 +1277,10 @@ export async function reapplyTransactionRulesForAllTransactions(): Promise<Reapp
   };
 }
 
-async function countTransactionsForAccountIds(accountId: number, sourceIds: string[]): Promise<number> {
-  if (sourceIds.length === 0) {
-    return 0;
-  }
-
-  const db = getFinanceDb();
-  const result = await db
-    .select({
-      count: sql<number>`count(*)`,
-    })
-    .from(transactionsTable)
-    .where(and(eq(transactionsTable.accountId, accountId), inArray(transactionsTable.sourceId, sourceIds)));
-
-  return Math.max(0, Math.trunc(toNumberValue(result[0]?.count)));
-}
-
 export async function importTransactionsForAccount(
   accountId: number,
   transactions: NormalizedTransaction[]
 ): Promise<ImportTransactionsResult> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
 
   if (transactions.length === 0) {
@@ -951,44 +1291,73 @@ export async function importTransactionsForAccount(
     };
   }
 
-  const uniqueSourceIds = Array.from(new Set(transactions.map((transaction) => transaction.id)));
-  const beforeCount = await countTransactionsForAccountIds(accountId, uniqueSourceIds);
   const preparedRules = await getPreparedTransactionRules();
-
-  await db
-    .insert(transactionsTable)
-    .values(
-      transactions.map((transaction) => {
-        const amountCents = Math.abs(Math.trunc(transaction.amountCents));
-        const automationResult = applyPreparedTransactionRules(preparedRules, {
-          accountId,
-          description: transaction.description,
-          amountCents,
-          categoryId: transaction.categoryId,
-        });
-
-        return {
-          accountId,
-          sourceId: transaction.id,
-          provider: transaction.provider,
-          bookingDate: transaction.bookingDate,
-          amountCents,
-          currency: transaction.currency,
-          direction: transaction.direction,
-          description: transaction.description,
-          categoryId: automationResult.categoryId ?? null,
-          counterparty: automationResult.counterparty ?? null,
-          reference: transaction.reference ?? null,
-          rawJson: JSON.stringify(transaction.raw),
-        };
-      })
-    )
-    .onConflictDoNothing({
-      target: [transactionsTable.accountId, transactionsTable.sourceId],
+  const preparedRows = transactions.map((transaction) => {
+    const amountCents = Math.abs(Math.trunc(transaction.amountCents));
+    const automationResult = applyPreparedTransactionRules(preparedRules, {
+      accountId,
+      description: transaction.description,
+      amountCents,
+      categoryId: transaction.categoryId,
+      tagIds: transaction.tagIds,
+      counterparty: transaction.counterparty,
     });
 
-  const afterCount = await countTransactionsForAccountIds(accountId, uniqueSourceIds);
-  const insertedCount = Math.max(0, afterCount - beforeCount);
+    return {
+      sourceId: transaction.id,
+      tagIds: normalizeTagIds(automationResult.tagIds),
+      values: {
+        accountId,
+        sourceId: transaction.id,
+        provider: transaction.provider,
+        bookingDate: transaction.bookingDate,
+        amountCents,
+        currency: transaction.currency,
+        direction: transaction.direction,
+        description: transaction.description,
+        categoryId: automationResult.categoryId ?? null,
+        counterparty: automationResult.counterparty ?? null,
+        reference: transaction.reference ?? null,
+        rawJson: JSON.stringify(transaction.raw),
+      },
+    };
+  });
+  const tagIdsBySourceId = new Map<string, number[]>();
+  preparedRows.forEach((row) => {
+    if (!tagIdsBySourceId.has(row.sourceId)) {
+      tagIdsBySourceId.set(row.sourceId, row.tagIds);
+    }
+  });
+
+  const insertedRows = await db
+    .insert(transactionsTable)
+    .values(preparedRows.map((row) => row.values))
+    .onConflictDoNothing({
+      target: [transactionsTable.accountId, transactionsTable.sourceId],
+    })
+    .returning({
+      id: transactionsTable.id,
+      sourceId: transactionsTable.sourceId,
+    });
+
+  const transactionTagRows = insertedRows.flatMap((row) => {
+    const tagIds = tagIdsBySourceId.get(row.sourceId) ?? [];
+    return tagIds.map((tagId) => ({
+      transactionId: row.id,
+      tagId,
+    }));
+  });
+
+  if (transactionTagRows.length > 0) {
+    await db
+      .insert(transactionTagsTable)
+      .values(transactionTagRows)
+      .onConflictDoNothing({
+        target: [transactionTagsTable.transactionId, transactionTagsTable.tagId],
+      });
+  }
+
+  const insertedCount = insertedRows.length;
 
   return {
     totalCount: transactions.length,
@@ -1001,7 +1370,6 @@ export async function createTransactionForAccount(
   accountId: number,
   input: CreateTransactionForAccountInput
 ): Promise<CreateTransactionForAccountResult> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
   const amountCents = Math.abs(Math.trunc(input.amountCents));
   const preparedRules = await getPreparedTransactionRules();
@@ -1010,29 +1378,45 @@ export async function createTransactionForAccount(
     description: input.description,
     amountCents,
     categoryId: input.categoryId,
+    tagIds: input.tagIds,
     counterparty: input.counterparty,
   });
+  const nextTagIds = normalizeTagIds(automationResult.tagIds);
 
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const sourceId = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${attempt}`;
 
     try {
-      await db.insert(transactionsTable).values({
-        accountId,
-        sourceId,
-        provider: input.provider,
-        bookingDate: input.bookingDate,
-        amountCents,
-        currency: input.currency,
-        direction: input.direction,
-        description: input.description,
-        categoryId: automationResult.categoryId ?? null,
-        counterparty: automationResult.counterparty ?? null,
-        reference: input.reference ?? null,
-        rawJson: JSON.stringify({
-          source: "manual",
-        }),
-      });
+      const inserted = await db
+        .insert(transactionsTable)
+        .values({
+          accountId,
+          sourceId,
+          provider: input.provider,
+          bookingDate: input.bookingDate,
+          amountCents,
+          currency: input.currency,
+          direction: input.direction,
+          description: input.description,
+          categoryId: automationResult.categoryId ?? null,
+          counterparty: automationResult.counterparty ?? null,
+          reference: input.reference ?? null,
+          rawJson: JSON.stringify({
+            source: "manual",
+          }),
+        })
+        .returning({
+          id: transactionsTable.id,
+        });
+
+      const insertedId = inserted[0]?.id;
+      if (typeof insertedId !== "number") {
+        throw new Error("Transaction insert succeeded but transaction id was not returned.");
+      }
+
+      if (nextTagIds.length > 0) {
+        await addTransactionTags(insertedId, nextTagIds);
+      }
 
       return {
         transactionId: sourceId,
@@ -1050,7 +1434,6 @@ export async function createTransactionForAccount(
 }
 
 export async function deleteTransactionForAccount(accountId: number, transactionId: string): Promise<boolean> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
 
   const existing = await db
@@ -1077,7 +1460,6 @@ export async function updateTransactionForAccount(
   transactionId: string,
   input: UpdateTransactionForAccountInput
 ): Promise<boolean> {
-  await ensureFinanceSchema();
   const db = getFinanceDb();
   const amountCents = Math.abs(Math.trunc(input.amountCents));
   const preparedRules = await getPreparedTransactionRules();
@@ -1086,8 +1468,10 @@ export async function updateTransactionForAccount(
     description: input.description,
     amountCents,
     categoryId: input.categoryId,
+    tagIds: input.tagIds,
     counterparty: input.counterparty,
   });
+  const nextTagIds = normalizeTagIds(automationResult.tagIds);
 
   const existing = await db
     .select({
@@ -1099,6 +1483,10 @@ export async function updateTransactionForAccount(
 
   if (existing.length === 0) {
     return false;
+  }
+  const existingTransactionId = existing[0]?.id;
+  if (typeof existingTransactionId !== "number") {
+    throw new Error("Transaction lookup succeeded but transaction id was not returned.");
   }
 
   await db
@@ -1115,6 +1503,7 @@ export async function updateTransactionForAccount(
     })
     .where(and(eq(transactionsTable.accountId, accountId), eq(transactionsTable.sourceId, transactionId)));
 
+  await replaceTransactionTags(existingTransactionId, nextTagIds);
   return true;
 }
 

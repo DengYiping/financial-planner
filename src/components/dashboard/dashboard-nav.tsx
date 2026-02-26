@@ -13,6 +13,7 @@ export function DashboardNav({ activeTab }: DashboardNavProps) {
   const accountSummaryHref = tabPath("account_summary");
   const rulesHref = tabPath("rules");
   const categoriesHref = tabPath("categories");
+  const tagsHref = tabPath("tags");
 
   return (
     <div className="mb-6 flex flex-wrap rounded-full border border-ink-soft/15 bg-surface p-1">
@@ -70,6 +71,17 @@ export function DashboardNav({ activeTab }: DashboardNavProps) {
         }`}
       >
         Categories
+      </Link>
+      <Link
+        href={tagsHref}
+        scroll={false}
+        className={`rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition ${
+          activeTab === "tags"
+            ? "bg-accent text-white shadow-[0_8px_20px_-12px_rgba(6,115,166,0.9)]"
+            : "text-muted hover:text-foreground"
+        }`}
+      >
+        Tags
       </Link>
     </div>
   );

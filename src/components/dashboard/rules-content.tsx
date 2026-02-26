@@ -2,7 +2,7 @@
 
 import { type FormEvent, useMemo, useState } from "react";
 import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
-import { resolveErrorMessage } from "@/components/dashboard/dashboard-shared";
+import { ACCOUNT_COLORS, resolveErrorMessage } from "@/components/dashboard/dashboard-shared";
 import { SectionShell } from "@/components/dashboard/section-shell";
 import type { AppRouter } from "@/server/api/routers/_app";
 import { trpc } from "@/trpc/react";
@@ -23,6 +23,8 @@ type RuleRecord = {
   accountIds: number[];
   actionCategoryId?: number;
   actionCategoryName?: string;
+  applyTagIds: number[];
+  applyTagNames: string[];
   assignCounterpartyFromRegexCapture: boolean;
   priority: number;
 };
@@ -35,6 +37,7 @@ type RuleDraft = {
   amountMax: string;
   accountIds: number[];
   actionCategoryId: string;
+  applyTagIds: number[];
   assignCounterpartyFromRegexCapture: boolean;
   priority: string;
 };
@@ -50,8 +53,40 @@ type CategoryChoice = {
   name: string;
 };
 
+type TagChoice = {
+  id: number;
+  name: string;
+  color: string;
+};
+
 const AMOUNT_PATTERN = /^\d+(?:[.,]\d{1,2})?$/;
 const DEFAULT_PRIORITY = 50;
+const DEFAULT_TAG_COLOR = "#5B7CBA";
+
+function tagAccent(tagId: number): string {
+  return ACCOUNT_COLORS[(tagId - 1 + ACCOUNT_COLORS.length) % ACCOUNT_COLORS.length] ?? DEFAULT_TAG_COLOR;
+}
+
+function parseTagIds(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const deduped = new Set<number>();
+  value.forEach((entry) => {
+    const id =
+      typeof entry === "number"
+        ? Math.trunc(entry)
+        : typeof entry === "string"
+          ? Number.parseInt(entry, 10)
+          : Number.NaN;
+    if (Number.isInteger(id) && id > 0) {
+      deduped.add(id);
+    }
+  });
+
+  return Array.from(deduped.values()).sort((left, right) => left - right);
+}
 
 function createEmptyDraft(): RuleDraft {
   return {
@@ -62,6 +97,7 @@ function createEmptyDraft(): RuleDraft {
     amountMax: "",
     accountIds: [],
     actionCategoryId: "",
+    applyTagIds: [],
     assignCounterpartyFromRegexCapture: false,
     priority: String(DEFAULT_PRIORITY),
   };
@@ -98,6 +134,15 @@ function formatAmount(cents: number): string {
 }
 
 function toRuleRecord(rule: PersistedRule): RuleRecord {
+  const ruleRecord = rule as unknown as Record<string, unknown>;
+  const applyTagsFromObjects = Array.isArray(ruleRecord.applyTags)
+    ? ruleRecord.applyTags
+        .map((entry) =>
+          entry && typeof entry === "object" ? (entry as Record<string, unknown>) : null
+        )
+        .filter((entry): entry is Record<string, unknown> => entry !== null)
+    : [];
+
   return {
     id: rule.id,
     descriptionContains: rule.descriptionContains,
@@ -108,6 +153,20 @@ function toRuleRecord(rule: PersistedRule): RuleRecord {
     accountIds: rule.accountIds ?? [],
     actionCategoryId: rule.applyCategoryId,
     actionCategoryName: rule.applyCategoryName,
+    applyTagIds:
+      rule.applyTagIds ??
+      parseTagIds(
+        applyTagsFromObjects.length > 0
+          ? applyTagsFromObjects.map((entry) => entry.id)
+          : ruleRecord.applyTagIds
+      ),
+    applyTagNames:
+      rule.applyTagNames ??
+      (applyTagsFromObjects.length > 0
+        ? applyTagsFromObjects
+            .map((entry) => (typeof entry.name === "string" ? entry.name.trim() : ""))
+            .filter((entry) => entry.length > 0)
+        : []),
     assignCounterpartyFromRegexCapture: rule.assignCounterpartyFromRegexGroup,
     priority: rule.priority,
   };
@@ -126,6 +185,7 @@ function toRuleDraft(rule: RuleRecord): RuleDraft {
     amountMax: toAmountInput(rule.amountMaxCents),
     accountIds: [...rule.accountIds],
     actionCategoryId: typeof rule.actionCategoryId === "number" ? String(rule.actionCategoryId) : "",
+    applyTagIds: [...rule.applyTagIds],
     assignCounterpartyFromRegexCapture: rule.assignCounterpartyFromRegexCapture,
     priority: String(rule.priority),
   };
@@ -146,6 +206,7 @@ function buildRulePayload(
       ? actionCategoryIdValue
       : undefined;
   const accountIds = [...draft.accountIds].sort((a, b) => a - b);
+  const applyTagIds = [...new Set(draft.applyTagIds)].filter((entry) => entry > 0).sort((a, b) => a - b);
 
   return {
     descriptionContains,
@@ -155,6 +216,7 @@ function buildRulePayload(
     amountMaxCents: maxCents,
     accountIds: accountIds.length > 0 ? accountIds : undefined,
     applyCategoryId,
+    applyTagIds: applyTagIds.length > 0 ? applyTagIds : undefined,
     assignCounterpartyFromRegexGroup: draft.assignCounterpartyFromRegexCapture,
     priority: parsedPriority,
   };
@@ -196,7 +258,11 @@ function summarizeConditions(rule: RuleRecord, accountNameById: Map<number, stri
   return parts.length > 0 ? parts.join(" • ") : "No condition details";
 }
 
-function summarizeActions(rule: RuleRecord, categoryNameById: Map<number, string>): string {
+function summarizeActions(
+  rule: RuleRecord,
+  categoryNameById: Map<number, string>,
+  tagNameById: Map<number, string>
+): string {
   const parts: string[] = [];
 
   if (typeof rule.actionCategoryId === "number") {
@@ -210,6 +276,13 @@ function summarizeActions(rule: RuleRecord, categoryNameById: Map<number, string
     parts.push("Set counterparty from regex capture #1");
   }
 
+  if (rule.applyTagIds.length > 0) {
+    const labels = rule.applyTagIds.map((tagId) => tagNameById.get(tagId) ?? `Tag #${tagId}`);
+    parts.push(`Apply tags: ${labels.join(", ")}`);
+  } else if (rule.applyTagNames.length > 0) {
+    parts.push(`Apply tags: ${rule.applyTagNames.join(", ")}`);
+  }
+
   return parts.length > 0 ? parts.join(" • ") : "No actions configured";
 }
 
@@ -217,6 +290,7 @@ export function RulesContent() {
   const utils = trpc.useUtils();
   const accountsQuery = trpc.accounts.list.useQuery();
   const categoriesQuery = trpc.accounts.listCategories.useQuery();
+  const tagsQuery = trpc.accounts.listTags.useQuery();
   const rulesQuery = trpc.accounts.listRules.useQuery();
   const createRuleMutation = trpc.accounts.createRule.useMutation();
   const updateRuleMutation = trpc.accounts.updateRule.useMutation();
@@ -252,6 +326,31 @@ export function RulesContent() {
         .sort((left, right) => left.name.localeCompare(right.name)),
     [categoriesQuery.data]
   );
+  const tagChoices = useMemo<TagChoice[]>(() => {
+    const fromApi = tagsQuery.data ?? [];
+    const byId = new Map<number, TagChoice>(
+      fromApi.map((tag) => [
+        tag.id,
+        {
+          id: tag.id,
+          name: tag.name,
+          color: tagAccent(tag.id),
+        },
+      ])
+    );
+    rules.forEach((rule) => {
+      rule.applyTagIds.forEach((tagId) => {
+        if (!byId.has(tagId)) {
+          byId.set(tagId, {
+            id: tagId,
+            name: `Tag #${tagId}`,
+            color: tagAccent(tagId),
+          });
+        }
+      });
+    });
+    return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [rules, tagsQuery.data]);
   const accountNameById = useMemo(() => {
     const map = new Map<number, string>();
     accountChoices.forEach((account) => {
@@ -266,6 +365,13 @@ export function RulesContent() {
     });
     return map;
   }, [categoryChoices]);
+  const tagNameById = useMemo(() => {
+    const map = new Map<number, string>();
+    tagChoices.forEach((tag) => {
+      map.set(tag.id, tag.name);
+    });
+    return map;
+  }, [tagChoices]);
 
   const isEditing = editingRuleId !== null;
   const isSaving = createRuleMutation.isPending || updateRuleMutation.isPending;
@@ -274,6 +380,8 @@ export function RulesContent() {
     ? resolveErrorMessage(rulesQuery.error, "Failed to load rules.")
     : categoriesQuery.error
       ? resolveErrorMessage(categoriesQuery.error, "Failed to load categories.")
+    : tagsQuery.error
+      ? resolveErrorMessage(tagsQuery.error, "Failed to load tags.")
     : accountsQuery.error
       ? resolveErrorMessage(accountsQuery.error, "Failed to load accounts.")
       : null;
@@ -301,6 +409,20 @@ export function RulesContent() {
         accountIds: hasAccount
           ? current.accountIds.filter((entry) => entry !== accountId)
           : [...current.accountIds, accountId],
+      };
+    });
+  }
+
+  function toggleApplyTagSelection(tagId: number): void {
+    setDraft((current) => {
+      const hasTag = current.applyTagIds.includes(tagId);
+      const nextTagIds = hasTag
+        ? current.applyTagIds.filter((entry) => entry !== tagId)
+        : [...current.applyTagIds, tagId];
+
+      return {
+        ...current,
+        applyTagIds: nextTagIds,
       };
     });
   }
@@ -355,8 +477,9 @@ export function RulesContent() {
 
     const parsedCategoryId = Number.parseInt(draft.actionCategoryId, 10);
     const hasCategoryAction = Number.isInteger(parsedCategoryId) && parsedCategoryId > 0;
-    if (!hasCategoryAction && !draft.assignCounterpartyFromRegexCapture) {
-      setFormError("Select a category or enable counterparty assignment.");
+    const hasApplyTagAction = draft.applyTagIds.length > 0;
+    if (!hasCategoryAction && !draft.assignCounterpartyFromRegexCapture && !hasApplyTagAction) {
+      setFormError("Select a category, choose tag actions, or enable counterparty assignment.");
       return;
     }
 
@@ -467,6 +590,7 @@ export function RulesContent() {
             </button>
             <p className="font-mono text-xs text-muted">{rules.length} rules</p>
             <p className="font-mono text-xs text-muted">{categoryChoices.length} categories available</p>
+            <p className="font-mono text-xs text-muted">{tagChoices.length} tags available</p>
             <p className="font-mono text-xs text-muted">{accountChoices.length} accounts available</p>
           </div>
         }
@@ -556,7 +680,9 @@ export function RulesContent() {
                         </div>
                       </header>
                       <p className="text-xs text-muted">{summarizeConditions(rule, accountNameById)}</p>
-                      <p className="mt-2 text-xs text-foreground">{summarizeActions(rule, categoryNameById)}</p>
+                      <p className="mt-2 text-xs text-foreground">
+                        {summarizeActions(rule, categoryNameById, tagNameById)}
+                      </p>
                     </article>
                   </li>
                 );
@@ -786,6 +912,57 @@ export function RulesContent() {
                     />
                     <span>Counterparty from regex capture #1</span>
                   </label>
+                </div>
+                <div className="rounded-2xl border border-ink-soft/15 bg-surface/80 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-xs font-semibold uppercase tracking-[0.1em] text-muted">Apply Tags</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDraft((current) => ({
+                          ...current,
+                          applyTagIds: [],
+                        }));
+                      }}
+                      disabled={draft.applyTagIds.length === 0}
+                      className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  {tagChoices.length === 0 ? (
+                    <p className="text-xs text-muted">No tags available.</p>
+                  ) : (
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      {tagChoices.map((tag) => {
+                        const isSelected = draft.applyTagIds.includes(tag.id);
+                        return (
+                          <button
+                            key={`rule-form-apply-tag-${tag.id}`}
+                            type="button"
+                            onClick={() => {
+                              toggleApplyTagSelection(tag.id);
+                            }}
+                            className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs transition ${
+                              isSelected
+                                ? "border-accent/35 bg-accent/10 text-accent"
+                                : "border-ink-soft/20 bg-surface text-foreground hover:border-ink-soft/35"
+                            }`}
+                          >
+                            <span className="inline-flex min-w-0 items-center gap-2">
+                              <span
+                                className="inline-block h-2.5 w-2.5 rounded-full"
+                                style={{ backgroundColor: tag.color }}
+                                aria-hidden
+                              />
+                              <span className="truncate">{tag.name}</span>
+                            </span>
+                            <span className="font-mono text-[11px]">{isSelected ? "ON" : "OFF"}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </section>
 

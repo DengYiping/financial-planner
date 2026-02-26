@@ -1,6 +1,12 @@
 import type { NormalizedTransaction, StatementProvider } from "@/lib/parsers";
 
-export type DashboardTab = "overview" | "transactions" | "account_summary" | "rules" | "categories";
+export type DashboardTab =
+  | "overview"
+  | "transactions"
+  | "account_summary"
+  | "rules"
+  | "categories"
+  | "tags";
 export type AccountKind = "aib_current" | "aib_mortgage" | "revolut_current" | "revolut_credit_card";
 export type AccountCurrency = "EUR" | "USD";
 type ParserStatus = "idle" | "loading" | "success" | "error";
@@ -245,6 +251,10 @@ export function tabPath(tab: DashboardTab): string {
 
   if (tab === "categories") {
     return "/categories";
+  }
+
+  if (tab === "tags") {
+    return "/tags";
   }
 
   return "/";

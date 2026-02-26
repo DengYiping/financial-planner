@@ -13,7 +13,6 @@ type TursoConfig = {
 
 let tursoClient: Client | null = null;
 let financeDb: LibSQLDatabase<typeof financeSchema> | null = null;
-let schemaValidationPromise: Promise<void> | null = null;
 let localEnvLoadAttempted = false;
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -114,31 +113,6 @@ export function getFinanceDb(): LibSQLDatabase<typeof financeSchema> {
   return financeDb;
 }
 
-async function validateFinanceSchema(db: LibSQLDatabase<typeof financeSchema>): Promise<void> {
-  await db.run(sql`PRAGMA foreign_keys = ON`);
-  const existing = await db.all<{ name: string }>(sql`
-    SELECT name
-    FROM sqlite_master
-    WHERE type = 'table'
-      AND name IN ('accounts', 'transactions', 'transaction_rules', 'categories', '__drizzle_migrations')
-  `);
-  const existingNames = new Set(existing.map((row) => row.name));
-  const requiredTables = [
-    "accounts",
-    "transactions",
-    "transaction_rules",
-    "categories",
-    "__drizzle_migrations",
-  ];
-  const missingTables = requiredTables.filter((tableName) => !existingNames.has(tableName));
-  if (missingTables.length > 0) {
-    throw new Error(
-      `Finance schema is not migrated. Missing tables: ${missingTables.join(", ")}. ` +
-        "Run `pnpm db:migrate` to apply Drizzle migrations."
-    );
-  }
-}
-
 export async function resetFinanceSchemaForLocal(): Promise<void> {
   const nodeEnv = process.env.NODE_ENV ?? "development";
   if (nodeEnv === "production") {
@@ -147,23 +121,13 @@ export async function resetFinanceSchemaForLocal(): Promise<void> {
 
   const db = getFinanceDb();
   await db.run(sql`PRAGMA foreign_keys = OFF`);
+  await db.run(sql`DROP TABLE IF EXISTS transaction_tags`);
+  await db.run(sql`DROP TABLE IF EXISTS transaction_rule_tags`);
   await db.run(sql`DROP TABLE IF EXISTS transactions`);
   await db.run(sql`DROP TABLE IF EXISTS transaction_rules`);
+  await db.run(sql`DROP TABLE IF EXISTS tags`);
   await db.run(sql`DROP TABLE IF EXISTS categories`);
   await db.run(sql`DROP TABLE IF EXISTS accounts`);
   await db.run(sql`DROP TABLE IF EXISTS __drizzle_migrations`);
   await db.run(sql`PRAGMA foreign_keys = ON`);
-
-  schemaValidationPromise = null;
-}
-
-export async function ensureFinanceSchema(): Promise<void> {
-  if (!schemaValidationPromise) {
-    schemaValidationPromise = validateFinanceSchema(getFinanceDb()).catch((error) => {
-      schemaValidationPromise = null;
-      throw error;
-    });
-  }
-
-  await schemaValidationPromise;
 }

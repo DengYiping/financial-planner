@@ -4,6 +4,7 @@ import {
   createTransactionForAccount,
   createAccount,
   createCategory,
+  createTag,
   createTransactionRule,
   deleteCategory,
   deleteAccountById,
@@ -16,11 +17,14 @@ import {
   isUniqueConstraintError,
   listAccounts,
   listCategories,
+  listTags,
   listTransactionRules,
   reapplyTransactionRulesForAllTransactions,
   updateCategory,
+  updateTag,
   updateTransactionRule,
   updateTransactionForAccount,
+  deleteTag,
   type AccountRecord,
 } from "@/lib/finance/persistence";
 import {
@@ -47,6 +51,11 @@ const monthKeyRegex = /^\d{4}-(0[1-9]|1[0-2])$/;
 const hexColorRegex = /^#(?:[0-9a-fA-F]{3}){1,2}$/;
 const monthKeySchema = z.string().regex(monthKeyRegex);
 const categoryNameSchema = z.string().trim().min(1).max(120);
+const tagNameSchema = z.string().trim().min(1).max(120);
+const tagReferenceSchema = z.object({
+  id: accountIdSchema,
+  name: tagNameSchema,
+});
 
 const normalizedTransactionSchema = z.object({
   id: z.string().trim().min(1).max(160),
@@ -58,6 +67,9 @@ const normalizedTransactionSchema = z.object({
   description: z.string().trim().min(1).max(500),
   categoryId: accountIdSchema.optional(),
   categoryHint: z.string().trim().min(1).max(120).optional(),
+  tags: z.array(tagReferenceSchema).max(500).optional(),
+  tagIds: z.array(accountIdSchema).max(500).optional(),
+  tagHints: z.array(tagNameSchema).max(500).optional(),
   counterparty: z.string().trim().min(1).max(300).optional(),
   reference: z.string().trim().min(1).max(300).optional(),
   raw: z.record(z.string(), z.string()),
@@ -120,6 +132,9 @@ const transactionRuleSchema = z.object({
   accountIds: z.array(accountIdSchema).min(1).optional(),
   applyCategoryId: accountIdSchema.optional(),
   applyCategoryName: z.string().min(1).max(120).optional(),
+  applyTags: z.array(tagReferenceSchema).min(1).optional(),
+  applyTagIds: z.array(accountIdSchema).min(1).optional(),
+  applyTagNames: z.array(tagNameSchema).min(1).optional(),
   assignCounterpartyFromRegexGroup: z.boolean(),
   priority: z.number().int(),
   createdAt: z.string(),
@@ -135,6 +150,7 @@ const transactionRuleInputSchema = z
     amountExactCents: z.number().int().nonnegative().nullish(),
     accountIds: z.array(accountIdSchema).max(500).nullish(),
     applyCategoryId: accountIdSchema.nullish(),
+    applyTagIds: z.array(accountIdSchema).max(500).nullish(),
     assignCounterpartyFromRegexGroup: z.boolean().optional(),
     priority: z.number().int(),
   })
@@ -215,7 +231,10 @@ const transactionRuleInputSchema = z
       });
     }
 
-    const hasAction = typeof value.applyCategoryId === "number" || value.assignCounterpartyFromRegexGroup === true;
+    const hasAction =
+      typeof value.applyCategoryId === "number" ||
+      (Array.isArray(value.applyTagIds) && value.applyTagIds.length > 0) ||
+      value.assignCounterpartyFromRegexGroup === true;
     if (!hasAction) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -227,6 +246,13 @@ const transactionRuleInputSchema = z
 const categorySchema = z.object({
   id: accountIdSchema,
   name: categoryNameSchema,
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+const tagSchema = z.object({
+  id: accountIdSchema,
+  name: tagNameSchema,
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -252,6 +278,7 @@ function toTransactionRuleWriteInput(input: TransactionRuleInput): TransactionRu
     amountExactCents: input.amountExactCents ?? undefined,
     accountIds: input.accountIds ?? undefined,
     applyCategoryId: input.applyCategoryId ?? undefined,
+    applyTagIds: input.applyTagIds ?? undefined,
     assignCounterpartyFromRegexGroup: input.assignCounterpartyFromRegexGroup ?? false,
     priority: input.priority,
   };
@@ -512,6 +539,123 @@ export const accountsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Failed to delete category.",
+        });
+      }
+    }),
+
+  listTags: publicProcedure.output(z.array(tagSchema)).query(async () => {
+    try {
+      return await listTags();
+    } catch {
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: "Failed to load tags.",
+      });
+    }
+  }),
+
+  createTag: publicProcedure
+    .input(
+      z.object({
+        name: tagNameSchema,
+      })
+    )
+    .output(tagSchema)
+    .mutation(async ({ input }) => {
+      try {
+        return await createTag({
+          name: input.name,
+        });
+      } catch (error) {
+        if (isUniqueConstraintError(error)) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "A tag with this name already exists.",
+          });
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to create tag.",
+        });
+      }
+    }),
+
+  updateTag: publicProcedure
+    .input(
+      z.object({
+        tagId: accountIdSchema,
+        name: tagNameSchema,
+      })
+    )
+    .output(tagSchema)
+    .mutation(async ({ input }) => {
+      try {
+        const updated = await updateTag(input.tagId, {
+          name: input.name,
+        });
+
+        if (!updated) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Tag was not found.",
+          });
+        }
+
+        return updated;
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        if (isUniqueConstraintError(error)) {
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "A tag with this name already exists.",
+          });
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to update tag.",
+        });
+      }
+    }),
+
+  deleteTag: publicProcedure
+    .input(
+      z.object({
+        tagId: accountIdSchema,
+      })
+    )
+    .output(
+      z.object({
+        tagId: accountIdSchema,
+        deleted: z.literal(true),
+      })
+    )
+    .mutation(async ({ input }) => {
+      try {
+        const deleted = await deleteTag(input.tagId);
+        if (!deleted) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Tag was not found.",
+          });
+        }
+
+        return {
+          tagId: input.tagId,
+          deleted: true as const,
+        };
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to delete tag.",
         });
       }
     }),
@@ -789,6 +933,7 @@ export const accountsRouter = createTRPCRouter({
         direction: z.enum(["in", "out"]),
         description: z.string().trim().min(1).max(500),
         categoryId: accountIdSchema.nullish(),
+        tagIds: z.array(accountIdSchema).max(500).nullish(),
         counterparty: z.string().trim().max(300).nullish(),
         reference: z.string().trim().max(300).nullish(),
       })
@@ -809,6 +954,7 @@ export const accountsRouter = createTRPCRouter({
           direction: input.direction,
           description: input.description,
           categoryId: input.categoryId ?? undefined,
+          tagIds: input.tagIds ?? undefined,
           counterparty: normalizeOptionalText(input.counterparty),
           reference: normalizeOptionalText(input.reference),
         });
@@ -847,6 +993,7 @@ export const accountsRouter = createTRPCRouter({
         direction: z.enum(["in", "out"]),
         description: z.string().trim().min(1).max(500),
         categoryId: accountIdSchema.nullish(),
+        tagIds: z.array(accountIdSchema).max(500).nullish(),
         counterparty: z.string().trim().max(300).nullish(),
         reference: z.string().trim().max(300).nullish(),
       })
@@ -876,6 +1023,7 @@ export const accountsRouter = createTRPCRouter({
           direction: input.direction,
           description: input.description,
           categoryId: input.categoryId ?? undefined,
+          tagIds: input.tagIds ?? undefined,
           counterparty: normalizeOptionalText(input.counterparty),
           reference: normalizeOptionalText(input.reference),
         });

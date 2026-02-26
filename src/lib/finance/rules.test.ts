@@ -54,14 +54,26 @@ test("validateAndNormalizeTransactionRuleInput normalizes fields", () => {
     amountMaxCents: 5000,
     accountIds: [3, 1, 3, 2],
     applyCategoryId: 7,
+    applyTagIds: [9, 2, 9, 5],
     assignCounterpartyFromRegexGroup: true,
     priority: 9,
   });
 
   assert.equal(normalized.descriptionContains, "Uber");
   assert.equal(normalized.applyCategoryId, 7);
+  assert.deepEqual(normalized.applyTagIds, [2, 5, 9]);
   assert.deepEqual(normalized.accountIds, [1, 2, 3]);
   assert.equal(normalized.assignCounterpartyFromRegexGroup, true);
+});
+
+test("validateAndNormalizeTransactionRuleInput accepts applyTagIds as an action", () => {
+  const normalized = validateAndNormalizeTransactionRuleInput({
+    descriptionContains: "transfer",
+    applyTagIds: [3, 1, 3],
+    priority: 1,
+  });
+
+  assert.deepEqual(normalized.applyTagIds, [1, 3]);
 });
 
 test("mapTransactionRuleRow parses persisted account id set", () => {
@@ -210,4 +222,36 @@ test("applyPreparedTransactionRules extracts counterparty from first regex group
     }
   );
   assert.equal(noCapture.counterparty, "Existing");
+});
+
+test("applyPreparedTransactionRules unions rule tags with existing transaction tags", () => {
+  const preparedRules = prepareTransactionRules([
+    {
+      id: 1,
+      descriptionContains: "payment",
+      applyTagIds: [3, 2],
+      assignCounterpartyFromRegexGroup: false,
+      priority: 1,
+      createdAt: "",
+      updatedAt: "",
+    },
+    {
+      id: 2,
+      descriptionContains: "payment",
+      applyTagIds: [1, 3],
+      assignCounterpartyFromRegexGroup: false,
+      priority: 10,
+      createdAt: "",
+      updatedAt: "",
+    },
+  ]);
+
+  const result = applyPreparedTransactionRules(preparedRules, {
+    accountId: 1,
+    description: "Card payment",
+    amountCents: 2200,
+    tagIds: [9, 2],
+  });
+
+  assert.deepEqual(result.tagIds, [1, 2, 3, 9]);
 });

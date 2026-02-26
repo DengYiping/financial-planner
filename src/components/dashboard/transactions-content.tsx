@@ -14,6 +14,7 @@ import { createPortal } from "react-dom";
 import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
 import { SectionShell } from "@/components/dashboard/section-shell";
 import {
+  ACCOUNT_COLORS,
   formatCurrencyCents,
   formatMonthLabel,
   resolveErrorMessage,
@@ -42,6 +43,7 @@ type EditableTransactionDraft = {
   currency: string;
   description: string;
   categoryId: string;
+  tagIds: number[];
   counterparty: string;
   reference: string;
 };
@@ -59,6 +61,7 @@ type RuleFromTransactionDraft = {
   amountMax: string;
   accountIds: number[];
   applyCategoryId: string;
+  applyTagIds: number[];
   assignCounterpartyFromRegexGroup: boolean;
   priority: string;
 };
@@ -82,9 +85,141 @@ type CategoryChoice = {
   name: string;
 };
 
+type TagChoice = {
+  id: number;
+  name: string;
+  color: string;
+};
+
+type TransactionTagBadge = {
+  id?: number;
+  name: string;
+  color: string;
+};
+
 const BOOKING_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const AMOUNT_PATTERN = /^\d+(?:[.,]\d{1,2})?$/;
 const RULE_DEFAULT_PRIORITY = "50";
+const DEFAULT_TAG_COLOR = "#5B7CBA";
+
+function tagAccent(tagId: number): string {
+  return ACCOUNT_COLORS[(tagId - 1 + ACCOUNT_COLORS.length) % ACCOUNT_COLORS.length] ?? DEFAULT_TAG_COLOR;
+}
+
+function parseTagId(value: unknown): number | null {
+  const parsed =
+    typeof value === "number"
+      ? Math.trunc(value)
+      : typeof value === "string"
+        ? Number.parseInt(value, 10)
+        : Number.NaN;
+
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function parseTagIds(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const deduped = new Set<number>();
+  value.forEach((entry) => {
+    const parsed = parseTagId(entry);
+    if (parsed !== null) {
+      deduped.add(parsed);
+    }
+  });
+
+  return Array.from(deduped.values()).sort((left, right) => left - right);
+}
+
+function parseTagNames(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const deduped = new Set<string>();
+  value.forEach((entry) => {
+    if (typeof entry === "string" && entry.trim().length > 0) {
+      deduped.add(entry.trim());
+    }
+  });
+
+  return Array.from(deduped.values()).sort((left, right) => left.localeCompare(right));
+}
+
+function getTransactionTagIds(transaction: TransactionRow["transaction"]): number[] {
+  const transactionRecord = transaction as unknown as Record<string, unknown>;
+  const directIds = parseTagIds(transactionRecord.tagIds);
+  if (directIds.length > 0) {
+    return directIds;
+  }
+
+  if (Array.isArray(transactionRecord.tags)) {
+    const nestedIds = parseTagIds(
+      transactionRecord.tags
+        .map((entry) =>
+          entry && typeof entry === "object" ? (entry as Record<string, unknown>).id : undefined
+        )
+        .filter(Boolean)
+    );
+    if (nestedIds.length > 0) {
+      return nestedIds;
+    }
+  }
+
+  return [];
+}
+
+function getTransactionTagBadges(
+  transaction: TransactionRow["transaction"],
+  tagById: Map<number, TagChoice>
+): TransactionTagBadge[] {
+  const transactionRecord = transaction as unknown as Record<string, unknown>;
+  const tagIds = getTransactionTagIds(transaction);
+  if (tagIds.length > 0) {
+    return tagIds.map((tagId) => {
+      const tag = tagById.get(tagId);
+      return {
+        id: tagId,
+        name: tag?.name ?? `Tag #${tagId}`,
+        color: tag?.color ?? DEFAULT_TAG_COLOR,
+      };
+    });
+  }
+
+  if (Array.isArray(transactionRecord.tags)) {
+    const parsedFromObjects: TransactionTagBadge[] = [];
+    transactionRecord.tags.forEach((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return;
+      }
+
+      const tag = entry as Record<string, unknown>;
+      const name = typeof tag.name === "string" ? tag.name.trim() : "";
+      if (name.length === 0) {
+        return;
+      }
+
+      const id = parseTagId(tag.id) ?? undefined;
+      parsedFromObjects.push({
+        id,
+        name,
+        color: id ? tagAccent(id) : DEFAULT_TAG_COLOR,
+      });
+    });
+
+    if (parsedFromObjects.length > 0) {
+      return parsedFromObjects;
+    }
+  }
+
+  const tagNames = parseTagNames(transactionRecord.tagHints ?? transactionRecord.tagNames);
+  return tagNames.map((name) => ({
+    name,
+    color: DEFAULT_TAG_COLOR,
+  }));
+}
 
 function getCategoryLabel(row: TransactionRow): string {
   return row.transaction.categoryHint ?? "Uncategorized";
@@ -138,6 +273,7 @@ function toEditableTransactionDraft(row: TransactionRow): EditableTransactionDra
     currency: row.transaction.currency,
     description: row.transaction.description,
     categoryId: typeof row.transaction.categoryId === "number" ? String(row.transaction.categoryId) : "",
+    tagIds: getTransactionTagIds(row.transaction),
     counterparty: row.transaction.counterparty ?? "",
     reference: row.transaction.reference ?? "",
   };
@@ -157,6 +293,7 @@ function toCreateTransactionDraft(account: AccountChoice | undefined, fallbackCu
     currency: account?.currency ?? fallbackCurrency,
     description: "",
     categoryId: "",
+    tagIds: [],
     counterparty: "",
     reference: "",
   };
@@ -171,13 +308,17 @@ function toCreateRuleDraftFromTransaction(draft: EditableTransactionDraft): Rule
     amountMax: "",
     accountIds: [],
     applyCategoryId: "",
+    applyTagIds: [...draft.tagIds],
     assignCounterpartyFromRegexGroup: false,
     priority: RULE_DEFAULT_PRIORITY,
   };
 }
 
 type ParseCreateRulePayloadResult =
-  | { ok: true; value: RouterInputs["accounts"]["createRule"] }
+  | {
+      ok: true;
+      value: RouterInputs["accounts"]["createRule"];
+    }
   | { ok: false; message: string };
 
 function parseCreateRulePayload(draft: RuleFromTransactionDraft): ParseCreateRulePayloadResult {
@@ -240,6 +381,9 @@ function parseCreateRulePayload(draft: RuleFromTransactionDraft): ParseCreateRul
   const accountIds = Array.from(
     new Set(draft.accountIds.filter((accountId) => Number.isInteger(accountId) && accountId > 0))
   ).sort((left, right) => left - right);
+  const applyTagIds = Array.from(
+    new Set(draft.applyTagIds.filter((tagId) => Number.isInteger(tagId) && tagId > 0))
+  ).sort((left, right) => left - right);
 
   const hasCondition =
     descriptionContains.length > 0 ||
@@ -252,7 +396,10 @@ function parseCreateRulePayload(draft: RuleFromTransactionDraft): ParseCreateRul
     return { ok: false, message: "At least one condition is required." };
   }
 
-  const hasAction = typeof applyCategoryId === "number" || draft.assignCounterpartyFromRegexGroup;
+  const hasAction =
+    typeof applyCategoryId === "number" ||
+    draft.assignCounterpartyFromRegexGroup ||
+    applyTagIds.length > 0;
   if (!hasAction) {
     return { ok: false, message: "At least one action is required." };
   }
@@ -267,6 +414,7 @@ function parseCreateRulePayload(draft: RuleFromTransactionDraft): ParseCreateRul
       amountMaxCents,
       accountIds: accountIds.length > 0 ? accountIds : undefined,
       applyCategoryId,
+      applyTagIds: applyTagIds.length > 0 ? applyTagIds : undefined,
       assignCounterpartyFromRegexGroup: draft.assignCounterpartyFromRegexGroup,
       priority: parsedPriority,
     },
@@ -281,8 +429,10 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
   const [descriptionSearchTerm, setDescriptionSearchTerm] = useState("");
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [accountFilterOpen, setAccountFilterOpen] = useState(false);
   const [categoryFilterOpen, setCategoryFilterOpen] = useState(false);
+  const [tagFilterOpen, setTagFilterOpen] = useState(false);
   const [transactionModal, setTransactionModal] = useState<TransactionModalState | null>(null);
   const [ruleModal, setRuleModal] = useState<RuleFromTransactionModalState | null>(null);
   const [editError, setEditError] = useState<string | null>(null);
@@ -295,7 +445,9 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
   const createRuleMutation = trpc.accounts.createRule.useMutation();
   const accountFilterRef = useRef<HTMLDivElement | null>(null);
   const categoryFilterRef = useRef<HTMLDivElement | null>(null);
+  const tagFilterRef = useRef<HTMLDivElement | null>(null);
   const updateTransactionMutation = trpc.accounts.updateTransaction.useMutation();
+  const tagsQuery = trpc.accounts.listTags.useQuery();
 
   useEffect(() => {
     setIsMounted(true);
@@ -356,7 +508,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
   }, [transactionModal, isMounted]);
 
   useEffect(() => {
-    if (!accountFilterOpen && !categoryFilterOpen) {
+    if (!accountFilterOpen && !categoryFilterOpen && !tagFilterOpen) {
       return;
     }
 
@@ -368,12 +520,16 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
       if (target && categoryFilterRef.current && !categoryFilterRef.current.contains(target)) {
         setCategoryFilterOpen(false);
       }
+      if (target && tagFilterRef.current && !tagFilterRef.current.contains(target)) {
+        setTagFilterOpen(false);
+      }
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setAccountFilterOpen(false);
         setCategoryFilterOpen(false);
+        setTagFilterOpen(false);
       }
     };
 
@@ -383,7 +539,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
       window.removeEventListener("mousedown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [accountFilterOpen, categoryFilterOpen]);
+  }, [accountFilterOpen, categoryFilterOpen, tagFilterOpen]);
 
   function openEditModal(row: TransactionRow): void {
     setEditError(null);
@@ -446,6 +602,12 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     );
   }
 
+  function toggleSelectedTag(tagName: string): void {
+    setSelectedTags((current) =>
+      current.includes(tagName) ? current.filter((value) => value !== tagName) : [...current, tagName]
+    );
+  }
+
   function removeSelectedAccount(accountName: string): void {
     setSelectedAccounts((current) => current.filter((value) => value !== accountName));
   }
@@ -454,12 +616,18 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     setSelectedCategories((current) => current.filter((value) => value !== category));
   }
 
+  function removeSelectedTag(tagName: string): void {
+    setSelectedTags((current) => current.filter((value) => value !== tagName));
+  }
+
   function clearAllClientFilters(): void {
     setDescriptionSearchTerm("");
     setSelectedAccounts([]);
     setSelectedCategories([]);
+    setSelectedTags([]);
     setAccountFilterOpen(false);
     setCategoryFilterOpen(false);
+    setTagFilterOpen(false);
   }
 
   function openCreateModal(): void {
@@ -536,6 +704,46 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     });
   }
 
+  function toggleEditingTag(tagId: number): void {
+    setTransactionModal((current) => {
+      if (!current) {
+        return null;
+      }
+
+      const selected = current.draft.tagIds.includes(tagId);
+      return {
+        ...current,
+        draft: {
+          ...current.draft,
+          tagIds: selected
+            ? current.draft.tagIds.filter((entry) => entry !== tagId)
+            : [...current.draft.tagIds, tagId],
+        },
+      };
+    });
+  }
+
+  function toggleRuleApplyTag(tagId: number): void {
+    setRuleModal((current) => {
+      if (!current) {
+        return null;
+      }
+
+      const selected = current.draft.applyTagIds.includes(tagId);
+      const nextTagIds = selected
+        ? current.draft.applyTagIds.filter((entry) => entry !== tagId)
+        : [...current.draft.applyTagIds, tagId];
+
+      return {
+        ...current,
+        draft: {
+          ...current.draft,
+          applyTagIds: nextTagIds,
+        },
+      };
+    });
+  }
+
   async function handleEditSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!transactionModal) {
@@ -549,6 +757,9 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     const description = draft.description.trim();
     const parsedCategoryId = Number.parseInt(draft.categoryId, 10);
     const categoryId = Number.isInteger(parsedCategoryId) && parsedCategoryId > 0 ? parsedCategoryId : undefined;
+    const tagIds = Array.from(
+      new Set(draft.tagIds.filter((tagId) => Number.isInteger(tagId) && tagId > 0))
+    ).sort((left, right) => left - right);
     const counterparty = draft.counterparty.trim();
     const reference = draft.reference.trim();
 
@@ -581,7 +792,9 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
 
     try {
       if (transactionModal.mode === "create") {
-        await createTransactionMutation.mutateAsync({
+        const createPayload: RouterInputs["accounts"]["createTransaction"] & {
+          tagIds?: number[];
+        } = {
           accountId: draft.accountId,
           bookingDate,
           amountCents,
@@ -591,14 +804,20 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
           categoryId,
           counterparty: counterparty.length > 0 ? counterparty : undefined,
           reference: reference.length > 0 ? reference : undefined,
-        });
+        };
+        if (tagIds.length > 0) {
+          createPayload.tagIds = tagIds;
+        }
+        await createTransactionMutation.mutateAsync(createPayload);
       } else {
         if (!draft.transactionId) {
           setEditError("Transaction id is missing.");
           return;
         }
 
-        await updateTransactionMutation.mutateAsync({
+        const updatePayload: RouterInputs["accounts"]["updateTransaction"] & {
+          tagIds?: number[];
+        } = {
           accountId: draft.accountId,
           transactionId: draft.transactionId,
           bookingDate,
@@ -609,7 +828,11 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
           categoryId,
           counterparty: counterparty.length > 0 ? counterparty : undefined,
           reference: reference.length > 0 ? reference : undefined,
-        });
+        };
+        if (tagIds.length > 0) {
+          updatePayload.tagIds = tagIds;
+        }
+        await updateTransactionMutation.mutateAsync(updatePayload);
       }
 
       setTransactionModal(null);
@@ -723,6 +946,66 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
       .sort((left, right) => left.name.localeCompare(right.name));
   }, [categoriesQuery.data]);
 
+  const tagChoices = useMemo<TagChoice[]>(() => {
+    const fromApi = tagsQuery.data ?? [];
+    const byId = new Map<number, TagChoice>(
+      fromApi.map((tag) => [
+        tag.id,
+        {
+          id: tag.id,
+          name: tag.name,
+          color: tagAccent(tag.id),
+        },
+      ])
+    );
+    const byName = new Map<string, TagChoice>();
+    fromApi.forEach((tag) => {
+      byName.set(tag.name, {
+        id: tag.id,
+        name: tag.name,
+        color: tagAccent(tag.id),
+      });
+    });
+
+    view.transactions.forEach((row) => {
+      const transaction = row.transaction as unknown as Record<string, unknown>;
+      getTransactionTagIds(row.transaction).forEach((tagId) => {
+        if (!byId.has(tagId)) {
+          byId.set(tagId, {
+            id: tagId,
+            name: `Tag #${tagId}`,
+            color: tagAccent(tagId),
+          });
+        }
+      });
+
+      const transactionNames = parseTagNames(transaction.tagHints ?? transaction.tagNames);
+      transactionNames.forEach((name) => {
+        if (!byName.has(name)) {
+          byName.set(name, {
+            id: Number.MIN_SAFE_INTEGER + byName.size,
+            name,
+            color: DEFAULT_TAG_COLOR,
+          });
+        }
+      });
+    });
+
+    return [...byId.values(), ...Array.from(byName.values()).filter((tag) => tag.id <= 0)].sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+  }, [tagsQuery.data, view.transactions]);
+
+  const tagChoiceById = useMemo(() => {
+    const byId = new Map<number, TagChoice>();
+    tagChoices.forEach((tag) => {
+      if (tag.id > 0) {
+        byId.set(tag.id, tag);
+      }
+    });
+    return byId;
+  }, [tagChoices]);
+
   const accountColorByName = useMemo(() => {
     const colors = new Map<string, string>();
 
@@ -747,6 +1030,22 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     );
   }, [view.transactions]);
 
+  const tagOptions = useMemo(() => {
+    return Array.from(new Set(tagChoices.map((tag) => tag.name))).sort((left, right) =>
+      left.localeCompare(right)
+    );
+  }, [tagChoices]);
+
+  const rowTagNames = useMemo(() => {
+    const byRowKey = new Map<string, string[]>();
+    view.transactions.forEach((row) => {
+      const key = `${row.accountId}-${row.transaction.id}`;
+      const names = getTransactionTagBadges(row.transaction, tagChoiceById).map((tag) => tag.name);
+      byRowKey.set(key, names);
+    });
+    return byRowKey;
+  }, [view.transactions, tagChoiceById]);
+
   const filteredTransactions = useMemo(() => {
     const normalizedSearchTerm = descriptionSearchTerm.trim().toLocaleLowerCase("en-US");
 
@@ -767,9 +1066,24 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
         return false;
       }
 
+      if (selectedTags.length > 0) {
+        const rowKey = `${row.accountId}-${row.transaction.id}`;
+        const names = rowTagNames.get(rowKey) ?? [];
+        if (!selectedTags.some((selectedTag) => names.includes(selectedTag))) {
+          return false;
+        }
+      }
+
       return true;
     });
-  }, [descriptionSearchTerm, selectedAccounts, selectedCategories, view.transactions]);
+  }, [
+    descriptionSearchTerm,
+    selectedAccounts,
+    selectedCategories,
+    selectedTags,
+    rowTagNames,
+    view.transactions,
+  ]);
 
   const columns = useMemo<ColumnDef<TransactionRow>[]>(
     () => [
@@ -784,6 +1098,35 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
         header: "Category",
         accessorFn: (row) => row.transaction.categoryHint ?? "Uncategorized",
         cell: ({ row }) => row.original.transaction.categoryHint ?? "Uncategorized",
+      },
+      {
+        id: "tags",
+        header: "Tags",
+        accessorFn: (row) =>
+          getTransactionTagBadges(row.transaction, tagChoiceById)
+            .map((tag) => tag.name)
+            .join(", "),
+        cell: ({ row }) => {
+          const badges = getTransactionTagBadges(row.original.transaction, tagChoiceById);
+          if (badges.length === 0) {
+            return <span className="text-muted">No tags</span>;
+          }
+
+          return (
+            <div className="flex flex-wrap gap-1.5">
+              {badges.map((tag) => (
+                <span
+                  key={`${row.original.accountId}-${row.original.transaction.id}-tag-${tag.id ?? tag.name}`}
+                  className="inline-flex items-center gap-1 rounded-full border border-ink-soft/20 px-2 py-0.5 text-[11px] font-semibold"
+                  style={{ color: tag.color }}
+                >
+                  <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: tag.color }} />
+                  <span className="truncate">{tag.name}</span>
+                </span>
+              ))}
+            </div>
+          );
+        },
       },
       {
         id: "account",
@@ -828,7 +1171,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
         },
       },
     ],
-    []
+    [tagChoiceById]
   );
   // TanStack table exposes mutable APIs that React Compiler's compatibility lint does not support.
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -887,7 +1230,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
           </button>
 
           <div className="w-full basis-full rounded-2xl border border-ink-soft/15 bg-surface/80 p-3">
-            <div className="grid gap-3 lg:grid-cols-[minmax(220px,1.2fr)_minmax(190px,1fr)_minmax(190px,1fr)_auto] lg:items-end">
+            <div className="grid gap-3 lg:grid-cols-[minmax(220px,1.2fr)_minmax(180px,1fr)_minmax(180px,1fr)_minmax(180px,1fr)_auto] lg:items-end">
               <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
                 Description Search
                 <input
@@ -908,6 +1251,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                   onClick={() => {
                     setAccountFilterOpen((current) => !current);
                     setCategoryFilterOpen(false);
+                    setTagFilterOpen(false);
                   }}
                   className="flex w-full items-center justify-between rounded-full border border-ink-soft/20 bg-surface px-3 py-2 text-xs text-foreground transition hover:border-ink-soft/35"
                 >
@@ -970,6 +1314,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                   onClick={() => {
                     setCategoryFilterOpen((current) => !current);
                     setAccountFilterOpen(false);
+                    setTagFilterOpen(false);
                   }}
                   className="flex w-full items-center justify-between rounded-full border border-ink-soft/20 bg-surface px-3 py-2 text-xs text-foreground transition hover:border-ink-soft/35"
                 >
@@ -1015,6 +1360,63 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                 ) : null}
               </div>
 
+              <div className="relative" ref={tagFilterRef}>
+                <p className="mb-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">Tags</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTagFilterOpen((current) => !current);
+                    setAccountFilterOpen(false);
+                    setCategoryFilterOpen(false);
+                  }}
+                  className="flex w-full items-center justify-between rounded-full border border-ink-soft/20 bg-surface px-3 py-2 text-xs text-foreground transition hover:border-ink-soft/35"
+                >
+                  <span className="truncate">
+                    {selectedTags.length === 0 ? "All tags" : `${selectedTags.length} selected`}
+                  </span>
+                  <span className="text-muted">{tagFilterOpen ? "▴" : "▾"}</span>
+                </button>
+                {tagFilterOpen ? (
+                  <div className="absolute z-30 mt-2 w-full rounded-xl border border-ink-soft/20 bg-surface p-2 shadow-[0_20px_40px_-28px_rgba(22,34,43,0.55)]">
+                    <div className="mb-2 flex items-center justify-between px-1">
+                      <span className="text-[11px] uppercase tracking-[0.1em] text-muted">
+                        {selectedTags.length} selected
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedTags([]);
+                        }}
+                        className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted hover:text-foreground"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <ul className="max-h-44 space-y-1 overflow-y-auto pr-1">
+                      {tagOptions.length === 0 ? (
+                        <li className="px-2 py-1.5 text-xs text-muted">No tags</li>
+                      ) : (
+                        tagOptions.map((tagName) => (
+                          <li key={tagName}>
+                            <label className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-foreground hover:bg-background/70">
+                              <input
+                                type="checkbox"
+                                checked={selectedTags.includes(tagName)}
+                                onChange={() => {
+                                  toggleSelectedTag(tagName);
+                                }}
+                                className="h-3.5 w-3.5 rounded border-ink-soft/30"
+                              />
+                              <span className="truncate">{tagName}</span>
+                            </label>
+                          </li>
+                        ))
+                      )}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+
               <div className="flex items-end">
                 <button
                   type="button"
@@ -1022,7 +1424,8 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                   disabled={
                     descriptionSearchTerm.trim().length === 0 &&
                     selectedAccounts.length === 0 &&
-                    selectedCategories.length === 0
+                    selectedCategories.length === 0 &&
+                    selectedTags.length === 0
                   }
                   className="rounded-full border border-ink-soft/20 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
                 >
@@ -1121,12 +1524,27 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                   <span className="text-muted">x</span>
                 </button>
               ))}
+              {selectedTags.map((tagName) => (
+                <button
+                  key={`tag-${tagName}`}
+                  type="button"
+                  onClick={() => {
+                    removeSelectedTag(tagName);
+                  }}
+                  className="inline-flex items-center gap-2 rounded-full border border-ink-soft/20 bg-surface px-3 py-1 text-xs font-semibold text-foreground transition hover:border-ink-soft/35"
+                  title="Remove tag filter"
+                >
+                  <span className="text-muted">Tag</span>
+                  {tagName}
+                  <span className="text-muted">x</span>
+                </button>
+              ))}
             </div>
           </div>
         </div>
 
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[700px] border-separate border-spacing-y-2">
+          <table className="w-full min-w-[860px] border-separate border-spacing-y-2">
             <thead className="text-left text-xs uppercase tracking-[0.14em] text-muted">
               {table.getHeaderGroups().map((headerGroup) => (
                 <tr key={headerGroup.id}>
@@ -1163,7 +1581,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
               {table.getRowModel().rows.length === 0 ? (
                 <tr className="rounded-2xl bg-surface">
                   <td
-                    colSpan={5}
+                    colSpan={6}
                     className="rounded-xl border border-ink-soft/15 px-3 py-6 text-center text-sm text-muted"
                   >
                     No transactions found. Add accounts and upload statement files on the Overview tab.
@@ -1191,6 +1609,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                       {row.getVisibleCells().map((cell) => {
                         const isDescription = cell.column.id === "description";
                         const isCategory = cell.column.id === "category";
+                        const isTags = cell.column.id === "tags";
                         const isAccount = cell.column.id === "account";
                         const isDate = cell.column.id === "date";
                         const isAmount = cell.column.id === "amount";
@@ -1203,7 +1622,8 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                               "border-ink-soft/15 px-3 py-3",
                               isDescription && "rounded-l-xl border border-r-0 text-sm text-foreground",
                               isCategory && "border-y text-sm text-muted",
-                              isAccount && "border-y text-sm",
+                              isTags && "border-y text-sm",
+                              isAccount && "border-y text-sm text-foreground",
                               isDate && "border-y font-mono text-xs text-muted",
                               isAmount &&
                                 `rounded-r-xl border border-l-0 text-right font-mono text-sm ${
@@ -1410,6 +1830,59 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                           className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
                         />
                       </label>
+                    </div>
+
+                    <div className="rounded-2xl border border-ink-soft/15 bg-surface/80 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">Tags</p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            updateEditingField("tagIds", []);
+                          }}
+                          disabled={transactionModal.draft.tagIds.length === 0}
+                          className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                      {tagChoices.filter((tag) => tag.id > 0).length === 0 ? (
+                        <p className="text-xs text-muted">
+                          No tags available yet. Create tags from the Tags tab to assign them here.
+                        </p>
+                      ) : (
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {tagChoices
+                            .filter((tag) => tag.id > 0)
+                            .map((tag) => {
+                              const isSelected = transactionModal.draft.tagIds.includes(tag.id);
+                              return (
+                                <button
+                                  key={tag.id}
+                                  type="button"
+                                  onClick={() => {
+                                    toggleEditingTag(tag.id);
+                                  }}
+                                  className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs transition ${
+                                    isSelected
+                                      ? "border-accent/35 bg-accent/10 text-accent"
+                                      : "border-ink-soft/20 bg-surface text-foreground hover:border-ink-soft/35"
+                                  }`}
+                                >
+                                  <span className="inline-flex min-w-0 items-center gap-2">
+                                    <span
+                                      className="inline-block h-2.5 w-2.5 rounded-full"
+                                      style={{ backgroundColor: tag.color }}
+                                      aria-hidden
+                                    />
+                                    <span className="truncate">{tag.name}</span>
+                                  </span>
+                                  <span className="font-mono text-[11px]">{isSelected ? "ON" : "OFF"}</span>
+                                </button>
+                              );
+                            })}
+                        </div>
+                      )}
                     </div>
 
                     <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
@@ -1676,6 +2149,57 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                           className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
                         />
                       </label>
+                    </div>
+
+                    <div className="rounded-2xl border border-ink-soft/15 bg-surface/80 p-3">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">Apply Tags</p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            updateRuleField("applyTagIds", []);
+                          }}
+                          disabled={ruleModal.draft.applyTagIds.length === 0}
+                          className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                      {tagChoices.filter((tag) => tag.id > 0).length === 0 ? (
+                        <p className="text-xs text-muted">No tags available.</p>
+                      ) : (
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {tagChoices
+                            .filter((tag) => tag.id > 0)
+                            .map((tag) => {
+                              const isSelected = ruleModal.draft.applyTagIds.includes(tag.id);
+                              return (
+                                <button
+                                  key={`rule-apply-tag-${tag.id}`}
+                                  type="button"
+                                  onClick={() => {
+                                    toggleRuleApplyTag(tag.id);
+                                  }}
+                                  className={`flex items-center justify-between rounded-xl border px-3 py-2 text-xs transition ${
+                                    isSelected
+                                      ? "border-accent/35 bg-accent/10 text-accent"
+                                      : "border-ink-soft/20 bg-surface text-foreground hover:border-ink-soft/35"
+                                  }`}
+                                >
+                                  <span className="inline-flex min-w-0 items-center gap-2">
+                                    <span
+                                      className="inline-block h-2.5 w-2.5 rounded-full"
+                                      style={{ backgroundColor: tag.color }}
+                                      aria-hidden
+                                    />
+                                    <span className="truncate">{tag.name}</span>
+                                  </span>
+                                  <span className="font-mono text-[11px]">{isSelected ? "ON" : "OFF"}</span>
+                                </button>
+                              );
+                            })}
+                        </div>
+                      )}
                     </div>
 
                     <label className="inline-flex items-center gap-2 rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-xs font-semibold uppercase tracking-[0.1em] text-muted">

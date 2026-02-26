@@ -87,8 +87,11 @@ async function main(): Promise<void> {
   const client = createClient(readTursoConfig());
 
   await client.execute("PRAGMA foreign_keys = OFF");
+  await client.execute("DROP TABLE IF EXISTS transaction_tags");
+  await client.execute("DROP TABLE IF EXISTS transaction_rule_tags");
   await client.execute("DROP TABLE IF EXISTS transactions");
   await client.execute("DROP TABLE IF EXISTS transaction_rules");
+  await client.execute("DROP TABLE IF EXISTS tags");
   await client.execute("DROP TABLE IF EXISTS categories");
   await client.execute("DROP TABLE IF EXISTS accounts");
   await client.execute("DROP TABLE IF EXISTS __drizzle_migrations");
