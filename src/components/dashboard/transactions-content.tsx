@@ -4,11 +4,13 @@ import {
   type ColumnDef,
   flexRender,
   getCoreRowModel,
+  getSortedRowModel,
+  type SortingState,
   useReactTable,
 } from "@tanstack/react-table";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { inferRouterOutputs } from "@trpc/server";
 import { SectionShell } from "@/components/dashboard/section-shell";
 import {
@@ -39,21 +41,25 @@ function transactionsSubTabPath(tab: TransactionTab): string {
 export function TransactionsContent({ transactionTab, view }: TransactionsContentProps) {
   const router = useRouter();
   const pathname = usePathname();
+  const [sorting, setSorting] = useState<SortingState>([]);
   const columns = useMemo<ColumnDef<TransactionRow>[]>(
     () => [
       {
         id: "description",
         header: "Description",
+        accessorFn: (row) => row.transaction.description,
         cell: ({ row }) => row.original.transaction.description,
       },
       {
         id: "category",
         header: "Category",
+        accessorFn: (row) => row.transaction.categoryHint ?? "Uncategorized",
         cell: ({ row }) => row.original.transaction.categoryHint ?? "Uncategorized",
       },
       {
         id: "account",
         header: "Account",
+        accessorFn: (row) => row.accountName,
         cell: ({ row }) => (
           <span
             className="inline-flex items-center gap-2 rounded-full border border-ink-soft/20 px-2.5 py-1 text-xs font-semibold"
@@ -71,11 +77,14 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
       {
         id: "date",
         header: "Date",
+        accessorFn: (row) => row.transaction.bookingDate,
         cell: ({ row }) => row.original.transaction.bookingDate,
       },
       {
         id: "amount",
         header: "Amount",
+        accessorFn: (row) =>
+          row.transaction.direction === "in" ? row.transaction.amountCents : -row.transaction.amountCents,
         cell: ({ row }) => {
           const transaction = row.original.transaction;
           const isIncome = transaction.direction === "in";
@@ -97,7 +106,12 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
   const table = useReactTable({
     data: view.transactions,
     columns,
+    state: {
+      sorting,
+    },
+    onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
+    getSortedRowModel: getSortedRowModel(),
     getRowId: (row) => `${row.accountId}-${row.transaction.id}`,
   });
 
@@ -171,12 +185,27 @@ export function TransactionsContent({ transactionTab, view }: TransactionsConten
                 <tr key={headerGroup.id}>
                   {headerGroup.headers.map((header) => {
                     const isAmount = header.column.id === "amount";
+                    const sorted = header.column.getIsSorted();
 
                     return (
                       <th key={header.id} className={`px-3 py-2 ${isAmount ? "text-right" : ""}`}>
-                        {header.isPlaceholder
-                          ? null
-                          : flexRender(header.column.columnDef.header, header.getContext())}
+                        {header.isPlaceholder ? null : header.column.getCanSort() ? (
+                          <button
+                            type="button"
+                            onClick={header.column.getToggleSortingHandler()}
+                            className={`inline-flex items-center gap-1 rounded-sm hover:text-foreground ${
+                              isAmount ? "ml-auto" : ""
+                            }`}
+                            aria-label={`Sort by ${String(header.column.columnDef.header)}`}
+                          >
+                            {flexRender(header.column.columnDef.header, header.getContext())}
+                            <span className="font-mono text-[10px] leading-none text-muted">
+                              {sorted === "asc" ? "^" : sorted === "desc" ? "v" : "-"}
+                            </span>
+                          </button>
+                        ) : (
+                          flexRender(header.column.columnDef.header, header.getContext())
+                        )}
                       </th>
                     );
                   })}
