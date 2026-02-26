@@ -6,7 +6,7 @@ export type NormalizedTransaction = {
   id: string;
   provider: StatementProvider;
   bookingDate: string;
-  amount: number;
+  amountCents: number;
   currency: string;
   direction: TransactionDirection;
   description: string;

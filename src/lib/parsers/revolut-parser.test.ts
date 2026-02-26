@@ -66,7 +66,7 @@ test("revolut parser validates supported fixture shapes", () => {
 
     result.transactions.forEach((transaction) => {
       assert.match(transaction.bookingDate, /^\d{4}-\d{2}-\d{2}$/);
-      assert.ok(transaction.amount > 0, "transaction amount should be positive");
+      assert.ok(transaction.amountCents > 0, "transaction amount cents should be positive");
       assert.equal(transaction.currency, fixture.expectedCurrency, fixture.name);
       assert.ok(transaction.description.length > 0, "description should not be empty");
       assert.ok(transaction.direction === "in" || transaction.direction === "out");
@@ -84,14 +84,14 @@ test("revolut parser uses completed date and handles fee-only charges", () => {
   assert.equal(firstTransaction.description, "Guangzhou Metro");
   assert.equal(firstTransaction.bookingDate, "2026-01-01");
   assert.equal(firstTransaction.direction, "out");
-  assert.equal(firstTransaction.amount, 0.37);
+  assert.equal(firstTransaction.amountCents, 37);
 
   const chargeTransaction = result.transactions.find(
     (transaction) => transaction.description === "Credit card Stamp Duty fee"
   );
   assert.ok(chargeTransaction, "Expected to find stamp duty charge transaction");
   assert.equal(chargeTransaction.direction, "out");
-  assert.equal(chargeTransaction.amount, 30);
+  assert.equal(chargeTransaction.amountCents, 3000);
   assert.equal(chargeTransaction.categoryHint, "fees");
 });
 

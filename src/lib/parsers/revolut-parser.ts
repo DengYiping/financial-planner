@@ -1,3 +1,4 @@
+import { parseAmountToCents } from "@/lib/parsers/amount";
 import { StatementParser } from "@/lib/parsers/statement-parser";
 import { NormalizedTransaction, ParseStatementInput, ParseStatementResult } from "@/lib/parsers/types";
 
@@ -55,29 +56,29 @@ export class RevolutStatementParser implements StatementParser {
         return;
       }
 
-      const amountValue = parseAmount(readCell(row, headerIndices["Amount"]));
-      const feeValue = parseAmount(readCell(row, headerIndices["Fee"]));
-      const netSignedAmount = resolveNetSignedAmount(amountValue, feeValue);
+      const amountValueCents = parseAmountToCents(readCell(row, headerIndices["Amount"]));
+      const feeValueCents = parseAmountToCents(readCell(row, headerIndices["Fee"]));
+      const netSignedAmountCents = resolveNetSignedAmountCents(amountValueCents, feeValueCents);
 
-      if (netSignedAmount === 0) {
+      if (netSignedAmountCents === 0) {
         return;
       }
 
-      const direction = netSignedAmount > 0 ? "in" : "out";
+      const direction = netSignedAmountCents > 0 ? "in" : "out";
       const currencyColumnIndex = headerIndices["Currency"];
       const currencyCell = readCell(row, currencyColumnIndex);
       const currency = currencyCell || inferFallbackCurrency(input.fileName);
 
       const description = readCell(row, headerIndices["Description"]);
       const type = readCell(row, headerIndices["Type"]);
-      const amount = Math.abs(netSignedAmount);
+      const amountCents = Math.abs(netSignedAmountCents);
 
       transactions.push({
         id: buildTransactionId({
           rowNumber,
           bookingDate,
           description,
-          amount,
+          amountCents,
           direction,
           currency,
           type,
@@ -85,7 +86,7 @@ export class RevolutStatementParser implements StatementParser {
         }),
         provider: this.provider,
         bookingDate,
-        amount,
+        amountCents,
         currency,
         direction,
         description,
@@ -189,16 +190,6 @@ function normalizeCell(value: string): string {
   return value.trim();
 }
 
-function parseAmount(value: string): number {
-  if (!value) {
-    return 0;
-  }
-
-  const normalized = value.replace(/[,\s]/g, "");
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 function parseRevolutDate(value: string): string | null {
   if (!value) {
     return null;
@@ -227,9 +218,9 @@ function parseRevolutDate(value: string): string | null {
   return parsed.toISOString().slice(0, 10);
 }
 
-function resolveNetSignedAmount(amountValue: number, feeValue: number): number {
-  const normalizedFee = Math.abs(feeValue);
-  return amountValue - normalizedFee;
+function resolveNetSignedAmountCents(amountValueCents: number, feeValueCents: number): number {
+  const normalizedFeeCents = Math.abs(feeValueCents);
+  return amountValueCents - normalizedFeeCents;
 }
 
 function inferFallbackCurrency(fileName?: string): string {
@@ -245,7 +236,7 @@ function buildTransactionId(params: {
   rowNumber: number;
   bookingDate: string;
   description: string;
-  amount: number;
+  amountCents: number;
   direction: "in" | "out";
   currency: string;
   type: string;
@@ -255,7 +246,7 @@ function buildTransactionId(params: {
   const productToken = sanitizeToken(params.product, 16);
   const descriptionToken = sanitizeToken(params.description, 28);
   const currencyToken = sanitizeToken(params.currency, 8);
-  const amountToken = params.amount.toFixed(2).replace(".", "_");
+  const amountToken = String(params.amountCents);
 
   return `revolut-${params.bookingDate}-${params.rowNumber}-${typeToken}-${productToken}-${params.direction}-${amountToken}-${currencyToken}-${descriptionToken}`;
 }

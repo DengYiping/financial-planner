@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Fraunces, IBM_Plex_Mono, Manrope } from "next/font/google";
+import { Providers } from "@/app/providers";
 import "./globals.css";
 
 const sans = Manrope({
@@ -32,7 +33,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${sans.variable} ${display.variable} ${mono.variable} antialiased`}>
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

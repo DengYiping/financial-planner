@@ -1,3 +1,4 @@
+import { parseAmountToCents } from "@/lib/parsers/amount";
 import { StatementParser } from "@/lib/parsers/statement-parser";
 import { NormalizedTransaction, ParseStatementInput, ParseStatementResult } from "@/lib/parsers/types";
 
@@ -54,16 +55,16 @@ export class AibStatementParser implements StatementParser {
         return;
       }
 
-      const debitAmount = parseAmount(readCell(row, headerIndices["Debit Amount"]));
-      const creditAmount = parseAmount(readCell(row, headerIndices["Credit Amount"]));
+      const debitAmountCents = parseAmountToCents(readCell(row, headerIndices["Debit Amount"]));
+      const creditAmountCents = parseAmountToCents(readCell(row, headerIndices["Credit Amount"]));
       const direction = resolveDirection(
-        debitAmount,
-        creditAmount,
+        debitAmountCents,
+        creditAmountCents,
         readCell(row, headerIndices["Transaction Type"])
       );
 
       if (!direction) {
-        if (debitAmount === 0 && creditAmount === 0) {
+        if (debitAmountCents === 0 && creditAmountCents === 0) {
           return;
         }
 
@@ -71,8 +72,8 @@ export class AibStatementParser implements StatementParser {
         return;
       }
 
-      const amount = direction === "out" ? debitAmount : creditAmount;
-      if (amount <= 0) {
+      const amountCents = direction === "out" ? debitAmountCents : creditAmountCents;
+      if (amountCents <= 0) {
         return;
       }
 
@@ -86,13 +87,13 @@ export class AibStatementParser implements StatementParser {
           rowNumber,
           accountIdentifier,
           bookingDate,
-          amount,
+          amountCents,
           description,
           direction,
         }),
         provider: this.provider,
         bookingDate,
-        amount,
+        amountCents,
         currency: "EUR",
         direction,
         description,
@@ -196,28 +197,18 @@ function normalizeCell(value: string): string {
   return value.trim();
 }
 
-function parseAmount(value: string): number {
-  if (!value) {
-    return 0;
-  }
-
-  const normalized = value.replace(/[,\s]/g, "");
-  const parsed = Number.parseFloat(normalized);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 function resolveDirection(
-  debitAmount: number,
-  creditAmount: number,
+  debitAmountCents: number,
+  creditAmountCents: number,
   transactionTypeRaw: string
 ): "in" | "out" | null {
-  if (debitAmount > 0 && creditAmount > 0) {
+  if (debitAmountCents > 0 && creditAmountCents > 0) {
     return null;
   }
-  if (debitAmount > 0) {
+  if (debitAmountCents > 0) {
     return "out";
   }
-  if (creditAmount > 0) {
+  if (creditAmountCents > 0) {
     return "in";
   }
 
@@ -260,7 +251,7 @@ function buildTransactionId(params: {
   rowNumber: number;
   accountIdentifier: string;
   bookingDate: string;
-  amount: number;
+  amountCents: number;
   description: string;
   direction: "in" | "out";
 }): string {
@@ -270,7 +261,7 @@ function buildTransactionId(params: {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 24);
-  const amountToken = params.amount.toFixed(2).replace(".", "_");
+  const amountToken = String(params.amountCents);
   return `aib-${accountToken}-${params.rowNumber}-${params.bookingDate}-${params.direction}-${amountToken}-${slug || "txn"}`;
 }
 

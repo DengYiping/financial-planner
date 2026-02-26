@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { BudgetBar } from "@/components/dashboard/budget-bar";
 import { SectionShell } from "@/components/dashboard/section-shell";
 import { SummaryCard } from "@/components/dashboard/summary-card";
@@ -10,6 +10,7 @@ import {
   ParserNotImplementedError,
   StatementProvider,
 } from "@/lib/parsers";
+import { trpc } from "@/trpc/react";
 
 type ParserStatus = "idle" | "loading" | "success" | "error";
 type PageTab = "overview" | "transactions" | "account_summary";
@@ -18,7 +19,7 @@ type AccountKind = "aib_current" | "aib_mortgage" | "revolut_current" | "revolut
 type AccountCurrency = "EUR" | "USD";
 
 type AccountState = {
-  id: string;
+  id: number;
   name: string;
   kind: AccountKind;
   provider: StatementProvider;
@@ -36,10 +37,21 @@ type AccountState = {
 };
 
 type AccountTransactionRow = {
-  accountId: string;
+  accountId: number;
   accountName: string;
   accountColor: string;
   transaction: NormalizedTransaction;
+};
+
+type PersistedAccountSnapshot = {
+  id: number;
+  name: string;
+  kind: AccountKind;
+  provider: StatementProvider;
+  currency?: AccountCurrency;
+  color: string;
+  transactionCount: number;
+  transactions: NormalizedTransaction[];
 };
 
 const ACCOUNT_KIND_CONFIG: Record<
@@ -84,6 +96,44 @@ const ACCOUNT_COLORS = [
   "#B14747",
   "#5B7CBA",
 ];
+
+function resolveErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  return fallback;
+}
+
+function mergePersistedAccounts(previous: AccountState[], persisted: PersistedAccountSnapshot[]): AccountState[] {
+  const previousById = new Map(previous.map((account) => [account.id, account]));
+
+  return persisted.map((account) => {
+    const previousAccount = previousById.get(account.id);
+    const mergedTransactions =
+      account.transactions.length > 0
+        ? mergeTransactions(previousAccount?.transactions ?? [], account.transactions)
+        : previousAccount?.transactions ?? [];
+
+    return {
+      id: account.id,
+      name: account.name,
+      kind: account.kind,
+      provider: account.provider,
+      currency: account.currency,
+      color: account.color,
+      status: previousAccount?.status ?? "idle",
+      lastUploadedFiles: previousAccount?.lastUploadedFiles ?? [],
+      parsedFileCountTotal: previousAccount?.parsedFileCountTotal ?? 0,
+      parsedFileCount: previousAccount?.parsedFileCount ?? 0,
+      importedTotal: Math.max(account.transactionCount, mergedTransactions.length),
+      parsedCount: previousAccount?.parsedCount ?? 0,
+      warnings: previousAccount?.warnings ?? [],
+      error: previousAccount?.error,
+      transactions: mergedTransactions,
+    };
+  });
+}
 
 function mergeTransactions(
   existing: NormalizedTransaction[],
@@ -146,6 +196,38 @@ function formatMonthLabel(monthKey: string): string {
   }).format(new Date(Date.UTC(year, month - 1, 1)));
 }
 
+function formatCurrencyCents(amountCents: number, currency: string, locale = "en-IE"): string {
+  const absoluteCents = Math.abs(amountCents);
+  const wholeUnits = Math.trunc(absoluteCents / 100);
+  const fractionalUnits = absoluteCents % 100;
+
+  const wholeUnitsLabel = new Intl.NumberFormat(locale, {
+    useGrouping: true,
+    maximumFractionDigits: 0,
+  }).format(wholeUnits);
+  const fractionLabel = String(fractionalUnits).padStart(2, "0");
+
+  const templateParts = new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).formatToParts(0);
+
+  return templateParts
+    .map((part) => {
+      if (part.type === "integer") {
+        return wholeUnitsLabel;
+      }
+      if (part.type === "fraction") {
+        return fractionLabel;
+      }
+
+      return part.value;
+    })
+    .join("");
+}
+
 export default function Home() {
   const todayLabel = new Intl.DateTimeFormat("en-US", {
     month: "long",
@@ -181,8 +263,29 @@ export default function Home() {
   const [draftKind, setDraftKind] = useState<AccountKind>("aib_current");
   const [draftRevolutCurrency, setDraftRevolutCurrency] = useState<AccountCurrency>("EUR");
 
-  const [nextAccountId, setNextAccountId] = useState<number>(1);
+  const accountsQuery = trpc.accounts.list.useQuery();
+  const createAccountMutation = trpc.accounts.create.useMutation();
+  const deleteAccountMutation = trpc.accounts.delete.useMutation();
+  const importTransactionsMutation = trpc.accounts.importTransactions.useMutation();
+
   const [accounts, setAccounts] = useState<AccountState[]>([]);
+  const [deletingAccountIds, setDeletingAccountIds] = useState<Set<number>>(new Set());
+  const [dataError, setDataError] = useState<string | null>(null);
+
+  const isHydratingData = accountsQuery.isPending && accounts.length === 0;
+  const isCreatingAccount = createAccountMutation.isPending;
+  const queryErrorMessage = accountsQuery.error
+    ? resolveErrorMessage(accountsQuery.error, "Failed to hydrate data from backend.")
+    : null;
+  const activeDataError = dataError ?? queryErrorMessage;
+
+  useEffect(() => {
+    if (!accountsQuery.data) {
+      return;
+    }
+
+    setAccounts((current) => mergePersistedAccounts(current, accountsQuery.data));
+  }, [accountsQuery.data]);
 
   const accountTransactions = useMemo(() => {
     const rows: AccountTransactionRow[] = [];
@@ -234,7 +337,7 @@ export default function Home() {
   const transactionsForActiveTab =
     transactionTab === "aggregated" ? chronologicalTransactions : recentTransactions;
 
-  const importedTransactionCount = accountTransactions.length;
+  const importedTransactionCount = accounts.reduce((sum, account) => sum + account.importedTotal, 0);
   const totalWarnings = accounts.reduce((sum, account) => sum + account.warnings.length, 0);
 
   const effectiveSummaryMonth = useMemo(() => {
@@ -258,12 +361,12 @@ export default function Home() {
       const monthlyTransactions = account.transactions.filter((transaction) =>
         transaction.bookingDate.startsWith(effectiveSummaryMonth)
       );
-      const inflow = monthlyTransactions.reduce(
-        (sum, transaction) => sum + (transaction.direction === "in" ? transaction.amount : 0),
+      const inflowCents = monthlyTransactions.reduce(
+        (sum, transaction) => sum + (transaction.direction === "in" ? transaction.amountCents : 0),
         0
       );
-      const outflow = monthlyTransactions.reduce(
-        (sum, transaction) => sum + (transaction.direction === "out" ? transaction.amount : 0),
+      const outflowCents = monthlyTransactions.reduce(
+        (sum, transaction) => sum + (transaction.direction === "out" ? transaction.amountCents : 0),
         0
       );
       const currency = account.currency ?? monthlyTransactions[0]?.currency ?? account.transactions[0]?.currency ?? "EUR";
@@ -275,14 +378,18 @@ export default function Home() {
         accountColor: account.color,
         currency,
         transactionCount: monthlyTransactions.length,
-        inflow,
-        outflow,
-        net: inflow - outflow,
+        inflowCents,
+        outflowCents,
+        netCents: inflowCents - outflowCents,
       };
     });
   }, [accounts, effectiveSummaryMonth]);
 
-  function handleAddAccount() {
+  async function handleAddAccount() {
+    if (isCreatingAccount) {
+      return;
+    }
+
     const kindConfig = ACCOUNT_KIND_CONFIG[draftKind];
     const currency = kindConfig.requiresCurrency ? draftRevolutCurrency : undefined;
     const sameTypeCount =
@@ -290,29 +397,65 @@ export default function Home() {
         (account) =>
           account.kind === draftKind && (account.currency ?? "none") === (currency ?? "none")
       ).length + 1;
+    const draftName = buildDefaultAccountName(draftKind, currency, sameTypeCount);
 
-    const account: AccountState = {
-      id: `account-${nextAccountId}`,
-      name: buildDefaultAccountName(draftKind, currency, sameTypeCount),
-      kind: draftKind,
-      provider: kindConfig.provider,
-      currency,
-      color: ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length],
-      status: "idle",
-      lastUploadedFiles: [],
-      parsedFileCountTotal: 0,
-      parsedFileCount: 0,
-      importedTotal: 0,
-      parsedCount: 0,
-      warnings: [],
-      transactions: [],
-    };
+    setDataError(null);
 
-    setAccounts((current) => [...current, account]);
-    setNextAccountId((current) => current + 1);
+    try {
+      await createAccountMutation.mutateAsync({
+        name: draftName,
+        kind: draftKind,
+        provider: kindConfig.provider,
+        currency,
+        color: ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length],
+      });
+      await accountsQuery.refetch();
+    } catch (error) {
+      setDataError(resolveErrorMessage(error, "Could not add account."));
+    }
   }
 
-  async function handleAccountUpload(accountId: string, event: ChangeEvent<HTMLInputElement>) {
+  async function handleDeleteAccount(account: AccountState) {
+    if (isHydratingData || deletingAccountIds.has(account.id) || account.status === "loading") {
+      return;
+    }
+
+    const transactionCount = account.transactions.length;
+    const confirmed = window.confirm(
+      `Delete "${account.name}"? This will remove the account and ${transactionCount} imported transaction${
+        transactionCount === 1 ? "" : "s"
+      }. This action cannot be undone.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingAccountIds((current) => {
+      const next = new Set(current);
+      next.add(account.id);
+      return next;
+    });
+    setDataError(null);
+
+    try {
+      await deleteAccountMutation.mutateAsync({
+        accountId: account.id,
+      });
+      setAccounts((current) => current.filter((entry) => entry.id !== account.id));
+      await accountsQuery.refetch();
+    } catch (error) {
+      setDataError(resolveErrorMessage(error, "Could not delete account."));
+    } finally {
+      setDeletingAccountIds((current) => {
+        const next = new Set(current);
+        next.delete(account.id);
+        return next;
+      });
+    }
+  }
+
+  async function handleAccountUpload(accountId: number, event: ChangeEvent<HTMLInputElement>) {
     const inputElement = event.currentTarget;
     const files = Array.from(inputElement.files ?? []);
     if (files.length === 0) {
@@ -341,6 +484,7 @@ export default function Home() {
     let parsedFileCount = 0;
     const warnings: string[] = [];
     const errors: string[] = [];
+    const uploadedFileNames = files.map((file) => file.name);
 
     try {
       for (const file of files) {
@@ -385,25 +529,86 @@ export default function Home() {
         }
       }
 
+      const parserError = errors.length > 0 ? errors.join(" | ") : undefined;
+
+      if (parsedTransactions.length > 0) {
+        await importTransactionsMutation.mutateAsync({
+          accountId,
+          transactions: parsedTransactions,
+        });
+        const refreshed = await accountsQuery.refetch();
+        if (refreshed.error) {
+          throw refreshed.error;
+        }
+        const persistedSnapshot = refreshed.data ?? [];
+
+        setAccounts((current) => {
+          const merged = mergePersistedAccounts(current, persistedSnapshot);
+
+          return merged.map((entry) => {
+            if (entry.id !== accountId) {
+              return entry;
+            }
+
+            const currentEntry = current.find((candidate) => candidate.id === accountId);
+            const mergedTransactions = mergeTransactions(entry.transactions, parsedTransactions);
+
+            return {
+              ...entry,
+              status: "success",
+              lastUploadedFiles: uploadedFileNames,
+              parsedFileCountTotal: (currentEntry?.parsedFileCountTotal ?? 0) + parsedFileCount,
+              parsedFileCount,
+              parsedCount: parsedTransactions.length,
+              importedTotal: Math.max(entry.importedTotal, mergedTransactions.length),
+              warnings,
+              error: parserError,
+              transactions: mergedTransactions,
+            };
+          });
+        });
+      } else {
+        setAccounts((current) =>
+          current.map((entry) => {
+            if (entry.id !== accountId) {
+              return entry;
+            }
+
+            return {
+              ...entry,
+              status: errors.length > 0 ? "error" : "success",
+              lastUploadedFiles: uploadedFileNames,
+              parsedFileCountTotal: entry.parsedFileCountTotal + parsedFileCount,
+              parsedFileCount,
+              parsedCount: 0,
+              warnings,
+              error: parserError,
+            };
+          })
+        );
+      }
+    } catch (error) {
+      const persistenceError = resolveErrorMessage(error, "Failed to process uploaded files.");
+
       setAccounts((current) =>
         current.map((entry) => {
           if (entry.id !== accountId) {
             return entry;
           }
 
-          const mergedTransactions = mergeTransactions(entry.transactions, parsedTransactions);
+          const mergedError = [errors.length > 0 ? errors.join(" | ") : undefined, persistenceError]
+            .filter((message): message is string => Boolean(message))
+            .join(" | ");
 
           return {
             ...entry,
-            status: errors.length > 0 && parsedTransactions.length === 0 ? "error" : "success",
-            lastUploadedFiles: files.map((file) => file.name),
+            status: "error",
+            lastUploadedFiles: uploadedFileNames,
             parsedFileCountTotal: entry.parsedFileCountTotal + parsedFileCount,
             parsedFileCount,
-            importedTotal: mergedTransactions.length,
             parsedCount: parsedTransactions.length,
             warnings,
-            error: errors.length > 0 ? errors.join(" | ") : undefined,
-            transactions: mergedTransactions,
+            error: mergedError,
           };
         })
       );
@@ -497,6 +702,7 @@ export default function Home() {
                     onChange={(event) => {
                       setDraftKind(event.target.value as AccountKind);
                     }}
+                    disabled={isHydratingData || isCreatingAccount}
                     className="rounded-full border border-ink-soft/20 bg-surface px-3 py-2 text-xs text-foreground outline-none focus:border-accent"
                   >
                     {(Object.keys(ACCOUNT_KIND_CONFIG) as AccountKind[]).map((kind) => (
@@ -515,6 +721,7 @@ export default function Home() {
                       onChange={(event) => {
                         setDraftRevolutCurrency(event.target.value as AccountCurrency);
                       }}
+                      disabled={isHydratingData || isCreatingAccount}
                       className="rounded-full border border-ink-soft/20 bg-surface px-3 py-2 text-xs text-foreground outline-none focus:border-accent"
                     >
                       {REVOLUT_CURRENT_CURRENCIES.map((currency) => (
@@ -529,13 +736,26 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={handleAddAccount}
+                  disabled={isHydratingData || isCreatingAccount}
                   className="rounded-full border border-accent/40 bg-accent/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-accent transition hover:bg-accent/20"
                 >
-                  Add Account
+                  {isCreatingAccount ? "Adding..." : "Add Account"}
                 </button>
               </div>
 
-              {accounts.length === 0 ? (
+              {isHydratingData && (
+                <p className="mb-4 rounded-2xl border border-ink-soft/15 bg-surface p-4 text-sm text-muted">
+                  Loading persisted accounts and transactions...
+                </p>
+              )}
+
+              {activeDataError && (
+                <p className="mb-4 rounded-2xl border border-danger/30 bg-danger/10 p-4 text-sm text-danger">
+                  {activeDataError}
+                </p>
+              )}
+
+              {!isHydratingData && accounts.length === 0 ? (
                 <p className="rounded-2xl border border-ink-soft/15 bg-surface p-4 text-sm text-muted">
                   No accounts yet. Add an account type above, then upload files into that account.
                 </p>
@@ -550,11 +770,25 @@ export default function Home() {
                             {getAccountTypeLabel(account.kind, account.currency)}
                           </p>
                         </div>
-                        <span
-                          className="inline-block h-3 w-3 rounded-full"
-                          style={{ backgroundColor: account.color }}
-                          aria-label="account color"
-                        />
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="inline-block h-3 w-3 rounded-full"
+                            style={{ backgroundColor: account.color }}
+                            aria-label="account color"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void handleDeleteAccount(account);
+                            }}
+                            disabled={
+                              isHydratingData || account.status === "loading" || deletingAccountIds.has(account.id)
+                            }
+                            className="rounded-full border border-danger/40 bg-danger/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-danger transition hover:bg-danger/20 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {deletingAccountIds.has(account.id) ? "Deleting..." : "Delete"}
+                          </button>
+                        </div>
                       </div>
 
                       <div className="mt-4 flex items-center gap-3">
@@ -568,7 +802,7 @@ export default function Home() {
                             onChange={(event) => {
                               void handleAccountUpload(account.id, event);
                             }}
-                            disabled={account.status === "loading"}
+                            disabled={account.status === "loading" || deletingAccountIds.has(account.id)}
                           />
                         </label>
                         <p className="font-mono text-xs text-muted">
@@ -723,10 +957,7 @@ export default function Home() {
                   transactionsForActiveTab.map((row) => {
                     const transaction = row.transaction;
                     const isIncome = transaction.direction === "in";
-                    const amount = new Intl.NumberFormat("en-IE", {
-                      style: "currency",
-                      currency: transaction.currency || "EUR",
-                    }).format(transaction.amount);
+                    const amount = formatCurrencyCents(transaction.amountCents, transaction.currency || "EUR");
 
                     return (
                       <tr key={`${row.accountId}-${transaction.id}`} className="rounded-2xl bg-surface">
@@ -827,11 +1058,6 @@ export default function Home() {
                 </thead>
                 <tbody>
                   {accountSummaryRows.map((row) => {
-                    const formatter = new Intl.NumberFormat("en-IE", {
-                      style: "currency",
-                      currency: row.currency,
-                    });
-
                     return (
                       <tr key={row.accountId} className="rounded-2xl bg-surface">
                         <td className="rounded-l-xl border border-r-0 border-ink-soft/15 px-3 py-3 text-sm text-foreground">
@@ -846,18 +1072,18 @@ export default function Home() {
                         </td>
                         <td className="border-y border-ink-soft/15 px-3 py-3 text-xs text-muted">{row.accountType}</td>
                         <td className="border-y border-ink-soft/15 px-3 py-3 text-right font-mono text-sm text-positive">
-                          +{formatter.format(row.inflow)}
+                          +{formatCurrencyCents(row.inflowCents, row.currency)}
                         </td>
                         <td className="border-y border-ink-soft/15 px-3 py-3 text-right font-mono text-sm text-foreground">
-                          -{formatter.format(row.outflow)}
+                          -{formatCurrencyCents(row.outflowCents, row.currency)}
                         </td>
                         <td
                           className={`border-y border-ink-soft/15 px-3 py-3 text-right font-mono text-sm ${
-                            row.net >= 0 ? "text-positive" : "text-danger"
+                            row.netCents >= 0 ? "text-positive" : "text-danger"
                           }`}
                         >
-                          {row.net >= 0 ? "+" : "-"}
-                          {formatter.format(Math.abs(row.net))}
+                          {row.netCents >= 0 ? "+" : "-"}
+                          {formatCurrencyCents(Math.abs(row.netCents), row.currency)}
                         </td>
                         <td className="rounded-r-xl border border-l-0 border-ink-soft/15 px-3 py-3 text-right font-mono text-sm text-muted">
                           {row.transactionCount}
