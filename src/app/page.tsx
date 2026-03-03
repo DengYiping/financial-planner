@@ -17,13 +17,19 @@ export default async function OverviewPage({
   }
 
   const caller = await getServerTrpcCaller();
-  const initialAccounts = await caller.accounts.list();
+  const [initialAccounts, initialBudgetPlannerView] = await Promise.all([
+    caller.accounts.list(),
+    caller.accounts.budgetPlannerView(),
+  ]);
 
   return (
     <main className="mx-auto max-w-6xl px-5 pb-12 pt-10 sm:px-8 lg:pt-14">
       <DashboardHeader />
       <DashboardNav activeTab="overview" />
-      <OverviewContent initialAccounts={initialAccounts} />
+      <OverviewContent
+        initialAccounts={initialAccounts}
+        initialBudgetPlannerView={initialBudgetPlannerView}
+      />
     </main>
   );
 }

@@ -1,7 +1,6 @@
 "use client";
 
 import { type ChangeEvent, useEffect, useState } from "react";
-import { BudgetBar } from "@/components/dashboard/budget-bar";
 import {
   ACCOUNT_COLORS,
   ACCOUNT_KIND_CONFIG,
@@ -14,6 +13,8 @@ import {
   type ImportPreviewConflict,
   type PersistedAccountSnapshot,
   buildDefaultAccountName,
+  formatCurrencyCents,
+  formatMonthLabel,
   getAccountTypeLabel,
   mergePersistedAccounts,
   resolveErrorMessage,
@@ -21,32 +22,20 @@ import {
 } from "@/components/dashboard/dashboard-shared";
 import { ImportReviewModal } from "@/components/dashboard/import-review-modal";
 import { SectionShell } from "@/components/dashboard/section-shell";
-import { SummaryCard } from "@/components/dashboard/summary-card";
 import { type NormalizedTransaction, parseStatement, ParserNotImplementedError } from "@/lib/parsers";
 import { trpc } from "@/trpc/react";
 
-const summaryCards = [
-  { label: "Net Worth", value: "EUR 38,420", helper: "+2.4% month to date", tone: "positive" as const },
-  { label: "Cash Position", value: "EUR 6,210", helper: "Covers ~2.8 months", tone: "neutral" as const },
-  { label: "Spending", value: "EUR 1,740", helper: "62% of monthly budget", tone: "warning" as const },
-  { label: "Savings Rate", value: "26%", helper: "Target is 30%", tone: "danger" as const },
-];
-
-const budgetRows = [
-  { category: "Housing", planned: "EUR 1,200", spent: "EUR 1,200", progress: 100 },
-  { category: "Groceries", planned: "EUR 420", spent: "EUR 318", progress: 76 },
-  { category: "Transport", planned: "EUR 240", spent: "EUR 182", progress: 75.8 },
-  { category: "Dining", planned: "EUR 280", spent: "EUR 305", progress: 108.9 },
-];
-
-const upcomingBills = [
-  { label: "Electricity Bill", due: "Mar 3", amount: "EUR 96" },
-  { label: "Internet", due: "Mar 7", amount: "EUR 55" },
-  { label: "Rent", due: "Mar 1", amount: "EUR 1,200" },
-];
-
 type OverviewContentProps = {
   initialAccounts: PersistedAccountSnapshot[];
+  initialBudgetPlannerView: {
+    month: string;
+    rows: Array<{
+      categoryName: string;
+      currency: string;
+      spentCents: number;
+      transactionCount: number;
+    }>;
+  };
 };
 
 type UploadContext = {
@@ -245,12 +234,15 @@ function buildCommitImportSummary(
   };
 }
 
-export function OverviewContent({ initialAccounts }: OverviewContentProps) {
+export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: OverviewContentProps) {
   const [draftKind, setDraftKind] = useState<AccountKind>("aib_current");
   const [draftRevolutCurrency, setDraftRevolutCurrency] = useState<AccountCurrency>("EUR");
 
   const accountsQuery = trpc.accounts.list.useQuery(undefined, {
     initialData: initialAccounts,
+  });
+  const budgetPlannerViewQuery = trpc.accounts.budgetPlannerView.useQuery(undefined, {
+    initialData: initialBudgetPlannerView,
   });
   const createAccountMutation = trpc.accounts.create.useMutation();
   const deleteAccountMutation = trpc.accounts.delete.useMutation();
@@ -262,13 +254,18 @@ export function OverviewContent({ initialAccounts }: OverviewContentProps) {
   const [dataError, setDataError] = useState<string | null>(null);
   const [pendingImportReview, setPendingImportReview] = useState<PendingImportReviewState | null>(null);
   const [pendingImportReviewError, setPendingImportReviewError] = useState<string | null>(null);
+  const budgetPlannerRows = budgetPlannerViewQuery.data?.rows ?? [];
+  const budgetPlannerMonth = budgetPlannerViewQuery.data?.month ?? initialBudgetPlannerView.month;
 
   const isHydratingData = accountsQuery.isPending && accounts.length === 0;
   const isCreatingAccount = createAccountMutation.isPending;
   const queryErrorMessage = accountsQuery.error
     ? resolveErrorMessage(accountsQuery.error, "Failed to hydrate account data from backend.")
     : null;
-  const activeDataError = dataError ?? queryErrorMessage;
+  const budgetPlannerQueryErrorMessage = budgetPlannerViewQuery.error
+    ? resolveErrorMessage(budgetPlannerViewQuery.error, "Failed to load budget planner data.")
+    : null;
+  const activeDataError = dataError ?? queryErrorMessage ?? budgetPlannerQueryErrorMessage;
 
   useEffect(() => {
     if (!accountsQuery.data) {
@@ -277,6 +274,14 @@ export function OverviewContent({ initialAccounts }: OverviewContentProps) {
 
     setAccounts((current) => mergePersistedAccounts(current, accountsQuery.data));
   }, [accountsQuery.data]);
+
+  async function refetchOverviewData() {
+    const [accountsRefresh] = await Promise.all([
+      accountsQuery.refetch(),
+      budgetPlannerViewQuery.refetch(),
+    ]);
+    return accountsRefresh;
+  }
 
   async function handleAddAccount() {
     if (isCreatingAccount) {
@@ -302,7 +307,7 @@ export function OverviewContent({ initialAccounts }: OverviewContentProps) {
         currency,
         color: ACCOUNT_COLORS[accounts.length % ACCOUNT_COLORS.length],
       });
-      await accountsQuery.refetch();
+      await refetchOverviewData();
     } catch (error) {
       setDataError(resolveErrorMessage(error, "Could not add account."));
     }
@@ -336,7 +341,7 @@ export function OverviewContent({ initialAccounts }: OverviewContentProps) {
         accountId: account.id,
       });
       setAccounts((current) => current.filter((entry) => entry.id !== account.id));
-      await accountsQuery.refetch();
+      await refetchOverviewData();
     } catch (error) {
       setDataError(resolveErrorMessage(error, "Could not delete account."));
     } finally {
@@ -397,7 +402,7 @@ export function OverviewContent({ initialAccounts }: OverviewContentProps) {
     });
 
     const importSummary = buildCommitImportSummary(importResponse, context.preview, dedupedForceImportIndexes);
-    const refreshed = await accountsQuery.refetch();
+    const refreshed = await refetchOverviewData();
     if (refreshed.error) {
       throw refreshed.error;
     }
@@ -663,13 +668,7 @@ export function OverviewContent({ initialAccounts }: OverviewContentProps) {
   return (
     <>
       <div className="animate-[tab-content-enter_280ms_cubic-bezier(0.22,1,0.36,1)] will-change-[opacity,transform]">
-        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          {summaryCards.map((card) => (
-            <SummaryCard key={card.label} {...card} />
-          ))}
-        </section>
-
-        <div className="mt-6 grid gap-6 lg:grid-cols-[1.2fr_1fr]">
+        <div className="grid gap-6 lg:grid-cols-[1.2fr_1fr]">
           <SectionShell
             title="Data Intake"
             subtitle="Add accounts by type and upload statement files directly into each account."
@@ -853,31 +852,51 @@ export function OverviewContent({ initialAccounts }: OverviewContentProps) {
             )}
           </SectionShell>
 
-          <SectionShell title="Budget Planner" subtitle="Track planned vs. actual spend for each category.">
-            <div className="space-y-3">
-              {budgetRows.map((budget) => (
-                <BudgetBar key={budget.category} {...budget} />
-              ))}
-            </div>
-          </SectionShell>
-        </div>
-
-        <div className="mt-6 grid gap-6 lg:grid-cols-2">
-          <SectionShell title="Upcoming Bills" subtitle="Prioritized obligations in the next two weeks.">
-            <ul className="space-y-3">
-              {upcomingBills.map((bill) => (
-                <li
-                  key={bill.label}
-                  className="flex items-center justify-between rounded-2xl border border-ink-soft/15 bg-surface p-4"
-                >
-                  <div>
-                    <p className="font-semibold text-foreground">{bill.label}</p>
-                    <p className="mt-1 text-sm text-muted">Due {bill.due}</p>
-                  </div>
-                  <p className="font-mono text-sm text-foreground">{bill.amount}</p>
-                </li>
-              ))}
-            </ul>
+          <SectionShell
+            title="Last Month Spending Stats"
+            subtitle={`Category statistics from ${formatMonthLabel(
+              budgetPlannerMonth
+            )} (excluding current month).`}
+          >
+            <p className="mb-3 inline-flex items-center rounded-full border border-ink-soft/20 bg-surface px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em] text-muted">
+              Calculated Month: {formatMonthLabel(budgetPlannerMonth)}
+            </p>
+            {budgetPlannerRows.length === 0 ? (
+              <p className="rounded-2xl border border-ink-soft/15 bg-surface p-4 text-sm text-muted">
+                No spending transactions found for {formatMonthLabel(budgetPlannerMonth)}.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {budgetPlannerRows.map((row) => {
+                  const totalLabel = formatCurrencyCents(row.spentCents, row.currency, "en-IE");
+                  const averageCents =
+                    row.transactionCount > 0 ? Math.round(row.spentCents / row.transactionCount) : 0;
+                  const averageLabel = formatCurrencyCents(averageCents, row.currency, "en-IE");
+                  return (
+                    <article
+                      key={`${row.categoryName}-${row.currency}`}
+                      className="rounded-2xl border border-ink-soft/15 bg-surface p-4"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <h3 className="text-sm font-semibold text-foreground">{row.categoryName}</h3>
+                          <p className="mt-1 text-xs text-muted">{row.currency}</p>
+                        </div>
+                        <p className="font-mono text-sm text-foreground">{totalLabel}</p>
+                      </div>
+                      <div className="mt-3 grid gap-2 text-xs text-muted sm:grid-cols-2">
+                        <p>
+                          Transactions: <span className="font-semibold text-foreground">{row.transactionCount}</span>
+                        </p>
+                        <p>
+                          Avg / transaction: <span className="font-semibold text-foreground">{averageLabel}</span>
+                        </p>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </SectionShell>
         </div>
       </div>

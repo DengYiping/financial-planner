@@ -91,6 +91,18 @@ export type DashboardSummaryView = {
   rows: DashboardAccountSummaryRow[];
 };
 
+export type DashboardBudgetPlannerRow = {
+  categoryName: string;
+  currency: string;
+  spentCents: number;
+  transactionCount: number;
+};
+
+export type DashboardBudgetPlannerView = {
+  month: string;
+  rows: DashboardBudgetPlannerRow[];
+};
+
 export type CreateAccountInput = {
   id?: number;
   name: string;
@@ -217,6 +229,14 @@ function parseRawJson(value: string): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+function getPreviousMonthKey(now: Date = new Date()): string {
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const previousMonth = month === 1 ? 12 : month - 1;
+  const previousYear = month === 1 ? year - 1 : year;
+  return `${previousYear}-${String(previousMonth).padStart(2, "0")}`;
 }
 
 function toRulePersistenceValues(input: ValidatedTransactionRuleWriteInput): {
@@ -839,6 +859,43 @@ export async function getDashboardSummaryView(input: DashboardSummaryViewInput):
     accountCount,
     importedTransactionCount,
     rows,
+  };
+}
+
+export async function getDashboardBudgetPlannerView(): Promise<DashboardBudgetPlannerView> {
+  const db = getFinanceDb();
+  const month = getPreviousMonthKey();
+  const categoryNameExpr = sql<string>`coalesce(${categories.name}, 'Uncategorized')`;
+  const spentCentsExpr =
+    sql<number>`coalesce(sum(case when ${transactionsTable.direction} = 'out' then ${transactionsTable.amountCents} else 0 end), 0)`;
+  const transactionCountExpr = sql<number>`count(${transactionsTable.id})`;
+
+  const rows = await db
+    .select({
+      categoryName: categoryNameExpr,
+      currency: transactionsTable.currency,
+      spentCents: spentCentsExpr,
+      transactionCount: transactionCountExpr,
+    })
+    .from(transactionsTable)
+    .leftJoin(categories, eq(categories.id, transactionsTable.categoryId))
+    .where(
+      and(
+        eq(transactionsTable.direction, "out"),
+        sql`substr(${transactionsTable.bookingDate}, 1, 7) = ${month}`
+      )
+    )
+    .groupBy(categoryNameExpr, transactionsTable.currency)
+    .orderBy(desc(spentCentsExpr), desc(transactionCountExpr), asc(categoryNameExpr), asc(transactionsTable.currency));
+
+  return {
+    month,
+    rows: rows.map((row) => ({
+      categoryName: row.categoryName,
+      currency: row.currency,
+      spentCents: Math.max(0, Math.trunc(toNumberValue(row.spentCents))),
+      transactionCount: Math.max(0, Math.trunc(toNumberValue(row.transactionCount))),
+    })),
   };
 }
 

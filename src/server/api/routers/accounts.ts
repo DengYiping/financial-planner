@@ -10,6 +10,7 @@ import {
   deleteAccountById,
   deleteTransactionRule,
   deleteTransactionForAccount,
+  getDashboardBudgetPlannerView,
   getDashboardSummaryView,
   getDashboardTransactionsView,
   getAccountById,
@@ -164,6 +165,18 @@ const summaryViewSchema = z.object({
   accountCount: z.number().int().nonnegative(),
   importedTransactionCount: z.number().int().nonnegative(),
   rows: z.array(summaryRowSchema),
+});
+
+const budgetPlannerRowSchema = z.object({
+  categoryName: z.string(),
+  currency: z.string().min(1),
+  spentCents: z.number().int().nonnegative(),
+  transactionCount: z.number().int().nonnegative(),
+});
+
+const budgetPlannerViewSchema = z.object({
+  month: monthKeySchema,
+  rows: z.array(budgetPlannerRowSchema),
 });
 
 const transactionRuleSchema = z.object({
@@ -929,6 +942,17 @@ export const accountsRouter = createTRPCRouter({
         });
       }
     }),
+
+  budgetPlannerView: publicProcedure.output(budgetPlannerViewSchema).query(async () => {
+    try {
+      return await getDashboardBudgetPlannerView();
+    } catch {
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: "Failed to load budget planner data.",
+      });
+    }
+  }),
 
   previewImportTransactions: publicProcedure
     .input(importTransactionsInputSchema)
