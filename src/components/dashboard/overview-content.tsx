@@ -246,11 +246,13 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
   });
   const createAccountMutation = trpc.accounts.create.useMutation();
   const deleteAccountMutation = trpc.accounts.delete.useMutation();
+  const clearAccountMutation = trpc.accounts.clearAccount.useMutation();
   const previewImportTransactionsMutation = trpc.accounts.previewImportTransactions.useMutation();
   const importTransactionsMutation = trpc.accounts.importTransactions.useMutation();
 
   const [accounts, setAccounts] = useState<AccountState[]>(() => mergePersistedAccounts([], initialAccounts));
   const [deletingAccountIds, setDeletingAccountIds] = useState<Set<number>>(new Set());
+  const [clearingAccountIds, setClearingAccountIds] = useState<Set<number>>(new Set());
   const [dataError, setDataError] = useState<string | null>(null);
   const [pendingImportReview, setPendingImportReview] = useState<PendingImportReviewState | null>(null);
   const [pendingImportReviewError, setPendingImportReviewError] = useState<string | null>(null);
@@ -353,6 +355,49 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
     }
   }
 
+  async function handleClearAccount(account: AccountState) {
+    if (
+      isHydratingData ||
+      clearingAccountIds.has(account.id) ||
+      deletingAccountIds.has(account.id) ||
+      account.status === "loading"
+    ) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Clear "${account.name}"? This will remove all ${account.recordCount} transaction record${
+        account.recordCount === 1 ? "" : "s"
+      } from this account, but keep the account itself.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setClearingAccountIds((current) => {
+      const next = new Set(current);
+      next.add(account.id);
+      return next;
+    });
+    setDataError(null);
+
+    try {
+      await clearAccountMutation.mutateAsync({
+        accountId: account.id,
+      });
+      await refetchOverviewData();
+    } catch (error) {
+      setDataError(resolveErrorMessage(error, "Could not clear account transactions."));
+    } finally {
+      setClearingAccountIds((current) => {
+        const next = new Set(current);
+        next.delete(account.id);
+        return next;
+      });
+    }
+  }
+
   function finalizeUploadWithoutPersist(
     context: UploadContext,
     status: "success" | "error",
@@ -425,7 +470,7 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
           parsedFileCountTotal: (currentEntry?.parsedFileCountTotal ?? 0) + context.parsedFileCount,
           parsedFileCount: context.parsedFileCount,
           parsedCount: context.parsedTransactions.length,
-          importedTotal: Math.max(entry.importedTotal, entry.transactions.length),
+          importedTotal: entry.recordCount,
           warnings: context.warnings,
           error: context.parserError,
           lastImportSummary: importSummary,
@@ -742,7 +787,7 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
               <div className="grid gap-4 sm:grid-cols-2">
                 {accounts.map((account) => (
                   <article key={account.id} className="rounded-2xl border border-ink-soft/15 bg-surface p-4">
-                    <div className="flex items-start justify-between gap-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <h3 className="font-semibold text-foreground">{account.name}</h3>
                         <p className="mt-1 text-xs text-muted">{getAccountTypeLabel(account.kind, account.currency)}</p>
@@ -756,10 +801,28 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                         <button
                           type="button"
                           onClick={() => {
+                            void handleClearAccount(account);
+                          }}
+                          disabled={
+                            isHydratingData ||
+                            account.status === "loading" ||
+                            deletingAccountIds.has(account.id) ||
+                            clearingAccountIds.has(account.id)
+                          }
+                          className="rounded-full border border-warning/40 bg-warning/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-warning transition hover:bg-warning/20 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {clearingAccountIds.has(account.id) ? "Clearing..." : "Clear"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
                             void handleDeleteAccount(account);
                           }}
                           disabled={
-                            isHydratingData || account.status === "loading" || deletingAccountIds.has(account.id)
+                            isHydratingData ||
+                            account.status === "loading" ||
+                            deletingAccountIds.has(account.id) ||
+                            clearingAccountIds.has(account.id)
                           }
                           className="rounded-full border border-danger/40 bg-danger/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-danger transition hover:bg-danger/20 disabled:cursor-not-allowed disabled:opacity-60"
                         >
@@ -782,6 +845,7 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                           disabled={
                             account.status === "loading" ||
                             deletingAccountIds.has(account.id) ||
+                            clearingAccountIds.has(account.id) ||
                             pendingImportReview !== null
                           }
                         />
@@ -796,6 +860,9 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                     </div>
 
                     <div className="mt-4 space-y-2 text-sm">
+                      <p className="text-foreground">
+                        Records in account (DB): <span className="font-semibold">{account.recordCount}</span>
+                      </p>
                       <p className="text-foreground">
                         Imported transactions total: <span className="font-semibold">{account.importedTotal}</span>
                       </p>

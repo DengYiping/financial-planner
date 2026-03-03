@@ -19,7 +19,7 @@ test("normalizeImportDescription and duplicate key normalization", () => {
   assert.equal(duplicateKey, "2026-01-10|1250|coffee shop");
 });
 
-test("analyzeImportDedupe classifies existing/incoming/both conflicts and keeps unique rows", () => {
+test("analyzeImportDedupe classifies existing conflicts while allowing incoming repeated rows", () => {
   const incoming: ImportDedupeTransaction[] = [
     {
       sourceId: "incoming-0",
@@ -83,8 +83,8 @@ test("analyzeImportDedupe classifies existing/incoming/both conflicts and keeps 
   const conflictByIndex = new Map(analyzed.conflicts.map((conflict) => [conflict.incomingIndex, conflict]));
   const decisionByIndex = new Map(analyzed.decisions.map((decision) => [decision.incomingIndex, decision]));
 
-  assert.equal(analyzed.duplicateConflictCount, 5);
-  assert.equal(analyzed.duplicateSkippedCount, 4);
+  assert.equal(analyzed.duplicateConflictCount, 3);
+  assert.equal(analyzed.duplicateSkippedCount, 3);
   assert.equal(analyzed.forcedImportCount, 0);
   assert.equal(analyzed.autoCancelled, false);
 
@@ -92,14 +92,16 @@ test("analyzeImportDedupe classifies existing/incoming/both conflicts and keeps 
   assert.equal(conflictByIndex.get(0)?.action, "skip");
   assert.equal(conflictByIndex.get(0)?.existingTransaction?.id, "existing-coffee");
   assert.equal(conflictByIndex.get(0)?.existingTransaction?.counterparty, "Coffee Shop Ltd");
-  assert.equal(conflictByIndex.get(1)?.reason, "incoming_duplicate");
-  assert.equal(conflictByIndex.get(1)?.action, "import");
-  assert.equal(conflictByIndex.get(2)?.reason, "incoming_duplicate");
-  assert.equal(conflictByIndex.get(2)?.action, "skip");
+  assert.equal(conflictByIndex.get(1), undefined);
+  assert.equal(conflictByIndex.get(2), undefined);
   assert.equal(conflictByIndex.get(3)?.reason, "both");
   assert.equal(conflictByIndex.get(4)?.reason, "both");
   assert.equal(conflictByIndex.get(3)?.existingTransaction?.id, "existing-rent");
 
+  assert.equal(decisionByIndex.get(1)?.reason, "incoming_duplicate");
+  assert.equal(decisionByIndex.get(1)?.shouldImport, true);
+  assert.equal(decisionByIndex.get(2)?.reason, "incoming_duplicate");
+  assert.equal(decisionByIndex.get(2)?.shouldImport, true);
   assert.equal(decisionByIndex.get(5)?.reason, undefined);
   assert.equal(decisionByIndex.get(5)?.shouldImport, true);
 
@@ -110,6 +112,33 @@ test("analyzeImportDedupe classifies existing/incoming/both conflicts and keeps 
     uncoveredUniqueCount: 2,
     fullyCovered: false,
   });
+});
+
+test("analyzeImportDedupe treats incoming-only duplicates as valid imports", () => {
+  const incoming: ImportDedupeTransaction[] = [
+    {
+      sourceId: "incoming-0",
+      bookingDate: "2026-03-01",
+      amountCents: 2100,
+      description: "Transfer To Savings",
+    },
+    {
+      sourceId: "incoming-1",
+      bookingDate: "2026-03-01",
+      amountCents: 2100,
+      description: " transfer   to savings ",
+    },
+  ];
+
+  const analyzed = analyzeImportDedupe(incoming, []);
+  const decisionByIndex = new Map(analyzed.decisions.map((decision) => [decision.incomingIndex, decision]));
+
+  assert.equal(analyzed.conflicts.length, 0);
+  assert.equal(analyzed.duplicateConflictCount, 0);
+  assert.equal(analyzed.duplicateSkippedCount, 0);
+  assert.equal(decisionByIndex.get(0)?.shouldImport, true);
+  assert.equal(decisionByIndex.get(1)?.shouldImport, true);
+  assert.equal(analyzed.autoCancelled, false);
 });
 
 test("analyzeImportDedupe marks fully covered imports as auto-cancelled by default", () => {
@@ -143,7 +172,7 @@ test("analyzeImportDedupe marks fully covered imports as auto-cancelled by defau
   assert.equal(analyzed.duplicateSkippedCount, 2);
 });
 
-test("analyzeImportDedupe forceImportIndexes override default skip decisions", () => {
+test("analyzeImportDedupe forceImportIndexes override default skip decisions for existing matches", () => {
   const incoming: ImportDedupeTransaction[] = [
     {
       sourceId: "incoming-0",

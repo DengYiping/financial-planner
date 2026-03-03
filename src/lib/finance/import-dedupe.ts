@@ -164,7 +164,6 @@ export function analyzeImportDedupe(
 
   const decisions: ImportDedupeDecision[] = [];
   const conflicts: ImportConflict[] = [];
-  const seenIncomingKeyCounts = new Map<string, number>();
 
   incomingRows.forEach((row) => {
     const hasExistingMatch = existingKeySet.has(row.duplicateKey);
@@ -178,16 +177,8 @@ export function analyzeImportDedupe(
       ? "incoming_duplicate"
       : undefined;
 
-    const seenCount = seenIncomingKeyCounts.get(row.duplicateKey) ?? 0;
-    seenIncomingKeyCounts.set(row.duplicateKey, seenCount + 1);
-
-    const defaultShouldImport =
-      reason === "existing_match" || reason === "both"
-        ? false
-        : reason === "incoming_duplicate"
-        ? seenCount === 0
-        : true;
-    const forced = reason !== undefined && !defaultShouldImport && normalizedForceIndexes.has(row.incomingIndex);
+    const defaultShouldImport = !hasExistingMatch;
+    const forced = hasExistingMatch && normalizedForceIndexes.has(row.incomingIndex);
     const shouldImport = forced ? true : defaultShouldImport;
 
     decisions.push({
@@ -198,7 +189,7 @@ export function analyzeImportDedupe(
       forced,
     });
 
-    if (reason !== undefined) {
+    if (reason === "existing_match" || reason === "both") {
       conflicts.push({
         incomingIndex: row.incomingIndex,
         incomingSourceId: row.sourceId,
@@ -211,8 +202,8 @@ export function analyzeImportDedupe(
     }
   });
 
-  const forcedImportCount = conflicts.reduce(
-    (count, conflict) => (conflict.forced && conflict.action === "import" ? count + 1 : count),
+  const forcedImportCount = decisions.reduce(
+    (count, decision) => (decision.forced && decision.shouldImport ? count + 1 : count),
     0
   );
   const autoCancelled = coverage.fullyCovered && forcedImportCount === 0;
@@ -220,7 +211,10 @@ export function analyzeImportDedupe(
   return {
     totalCount: totalIncomingCount,
     duplicateConflictCount: conflicts.length,
-    duplicateSkippedCount: conflicts.reduce((count, conflict) => (conflict.action === "skip" ? count + 1 : count), 0),
+    duplicateSkippedCount: decisions.reduce(
+      (count, decision) => (decision.reason && !decision.shouldImport ? count + 1 : count),
+      0
+    ),
     forcedImportCount,
     autoCancelled,
     cancelReason: autoCancelled ? "all_unique_keys_already_exist" : undefined,

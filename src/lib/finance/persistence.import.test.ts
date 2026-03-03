@@ -195,7 +195,7 @@ after(() => {
   rmSync(testDbDirectory, { recursive: true, force: true });
 });
 
-test("preview and default import skip duplicate conflicts with accurate counters", async () => {
+test("preview and default import only skip rows already existing in account", async () => {
   const accountId = await createTestAccountId();
 
   const seedImport = await importTransactionsForAccount(accountId, [
@@ -212,18 +212,18 @@ test("preview and default import skip duplicate conflicts with accurate counters
 
   const preview = await previewImportTransactionsForAccount(accountId, incoming);
   assert.equal(preview.totalCount, 4);
-  assert.equal(preview.duplicateConflictCount, 3);
-  assert.equal(preview.duplicateSkippedCount, 2);
+  assert.equal(preview.duplicateConflictCount, 1);
+  assert.equal(preview.duplicateSkippedCount, 1);
   assert.equal(preview.forcedImportCount, 0);
   assert.equal(preview.autoCancelled, false);
   assert.equal(preview.coverage.fullyCovered, false);
 
   const imported = await importTransactionsForAccount(accountId, incoming);
   assert.equal(imported.totalCount, 4);
-  assert.equal(imported.insertedCount, 2);
-  assert.equal(imported.skippedCount, 2);
-  assert.equal(imported.duplicateConflictCount, 3);
-  assert.equal(imported.duplicateSkippedCount, 2);
+  assert.equal(imported.insertedCount, 3);
+  assert.equal(imported.skippedCount, 1);
+  assert.equal(imported.duplicateConflictCount, 1);
+  assert.equal(imported.duplicateSkippedCount, 1);
   assert.equal(imported.forcedImportCount, 0);
   assert.equal(imported.autoCancelled, false);
 
@@ -232,9 +232,38 @@ test("preview and default import skip duplicate conflicts with accurate counters
   const importedIds = new Set(account.transactions.map((transaction) => transaction.id));
   assert.ok(importedIds.has("seed-1"));
   assert.ok(importedIds.has("new-incoming-first"));
+  assert.ok(importedIds.has("new-incoming-second"));
   assert.ok(importedIds.has("new-unique"));
   assert.equal(importedIds.has("new-existing-match"), false);
-  assert.equal(importedIds.has("new-incoming-second"), false);
+  assert.equal(account.transactions.length, 4);
+});
+
+test("incoming-only duplicates are imported without opening review conflicts", async () => {
+  const accountId = await createTestAccountId();
+  const incoming = [
+    createTransaction("incoming-dup-1", "2026-03-15", 3200, "Utility Payment"),
+    createTransaction("incoming-dup-2", "2026-03-15", 3200, " utility   payment "),
+  ];
+
+  const preview = await previewImportTransactionsForAccount(accountId, incoming);
+  assert.equal(preview.conflicts.length, 0);
+  assert.equal(preview.duplicateConflictCount, 0);
+  assert.equal(preview.duplicateSkippedCount, 0);
+  assert.equal(preview.autoCancelled, false);
+
+  const imported = await importTransactionsForAccount(accountId, incoming);
+  assert.equal(imported.insertedCount, 2);
+  assert.equal(imported.skippedCount, 0);
+  assert.equal(imported.duplicateConflictCount, 0);
+  assert.equal(imported.duplicateSkippedCount, 0);
+  assert.equal(imported.forcedImportCount, 0);
+
+  const account = await getAccountById(accountId);
+  assert.ok(account);
+  const importedIds = new Set(account.transactions.map((transaction) => transaction.id));
+  assert.equal(account.transactions.length, 2);
+  assert.ok(importedIds.has("incoming-dup-1"));
+  assert.ok(importedIds.has("incoming-dup-2"));
 });
 
 test("duplicate transaction is flagged in preview and can be reviewed via force import", async () => {

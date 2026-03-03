@@ -2,6 +2,7 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import {
   createTransactionForAccount,
+  clearTransactionsForAccount,
   createAccount,
   createCategory,
   createTag,
@@ -497,6 +498,42 @@ export const accountsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Failed to delete account.",
+        });
+      }
+    }),
+
+  clearAccount: publicProcedure
+    .input(
+      z.object({
+        accountId: accountIdSchema,
+      })
+    )
+    .output(
+      z.object({
+        accountId: z.number().int().positive(),
+        deletedCount: z.number().int().nonnegative(),
+        cleared: z.literal(true),
+      })
+    )
+    .mutation(async ({ input }) => {
+      try {
+        const cleared = await clearTransactionsForAccount(input.accountId);
+        if (!cleared) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Account was not found.",
+          });
+        }
+
+        return cleared;
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to clear account transactions.",
         });
       }
     }),

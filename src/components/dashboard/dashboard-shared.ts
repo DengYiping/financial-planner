@@ -47,6 +47,7 @@ export type AccountState = {
   provider: StatementProvider;
   currency?: AccountCurrency;
   color: string;
+  recordCount: number;
   status: ParserStatus;
   lastUploadedFiles: string[];
   parsedFileCountTotal: number;
@@ -158,11 +159,12 @@ export function mergePersistedAccounts(previous: AccountState[], persisted: Pers
       provider: account.provider,
       currency: account.currency,
       color: account.color,
+      recordCount: account.transactionCount,
       status: previousAccount?.status ?? "idle",
       lastUploadedFiles: previousAccount?.lastUploadedFiles ?? [],
       parsedFileCountTotal: previousAccount?.parsedFileCountTotal ?? 0,
       parsedFileCount: previousAccount?.parsedFileCount ?? 0,
-      importedTotal: Math.max(account.transactionCount, mergedTransactions.length),
+      importedTotal: account.transactionCount,
       parsedCount: previousAccount?.parsedCount ?? 0,
       warnings: previousAccount?.warnings ?? [],
       error: previousAccount?.error,

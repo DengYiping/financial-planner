@@ -112,6 +112,12 @@ export type CreateAccountInput = {
   color: string;
 };
 
+export type ClearAccountTransactionsResult = {
+  accountId: number;
+  deletedCount: number;
+  cleared: true;
+};
+
 export type { ImportCoverageSummary, ImportConflict, ImportPreviewResult };
 
 export type ImportTransactionsOptions = {
@@ -964,6 +970,41 @@ export async function deleteAccountById(accountId: number): Promise<boolean> {
 
   await db.delete(accounts).where(eq(accounts.id, accountId));
   return true;
+}
+
+export async function clearTransactionsForAccount(
+  accountId: number
+): Promise<ClearAccountTransactionsResult | null> {
+  const db = getFinanceDb();
+
+  const existing = await db
+    .select({
+      id: accounts.id,
+    })
+    .from(accounts)
+    .where(eq(accounts.id, accountId))
+    .limit(1);
+
+  if (existing.length === 0) {
+    return null;
+  }
+
+  const countRows = await db
+    .select({
+      count: sql<number>`count(*)`,
+    })
+    .from(transactionsTable)
+    .where(eq(transactionsTable.accountId, accountId));
+
+  const deletedCount = Math.max(0, Math.trunc(toNumberValue(countRows[0]?.count)));
+
+  await db.delete(transactionsTable).where(eq(transactionsTable.accountId, accountId));
+
+  return {
+    accountId,
+    deletedCount,
+    cleared: true,
+  };
 }
 
 function toCategoryRecord(row: typeof categories.$inferSelect): CategoryRecord {
