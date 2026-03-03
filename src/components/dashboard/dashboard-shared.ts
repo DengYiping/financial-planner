@@ -10,6 +10,33 @@ export type DashboardTab =
 export type AccountKind = "aib_current" | "aib_mortgage" | "revolut_current" | "revolut_credit_card";
 export type AccountCurrency = "EUR" | "USD";
 type ParserStatus = "idle" | "loading" | "success" | "error";
+export type ImportConflictAction = "keep_existing" | "force_import";
+export type ComparableTransaction = {
+  id?: string;
+  bookingDate?: string;
+  amountCents?: number;
+  currency?: string;
+  direction?: "in" | "out";
+  description?: string;
+  counterparty?: string;
+  reference?: string;
+};
+export type ImportPreviewConflict = {
+  incomingIndex: number;
+  incomingTransaction: NormalizedTransaction;
+  existingTransaction?: ComparableTransaction;
+  coverage?: number;
+  reason?: string;
+};
+export type AccountImportSummary = {
+  totalCount: number;
+  insertedCount: number;
+  duplicateSkippedCount: number;
+  forcedImportedCount: number;
+  conflictsReviewedCount: number;
+  autoCancelled: boolean;
+  autoCancelReason?: string;
+};
 
 const MONTH_KEY_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
 
@@ -28,6 +55,7 @@ export type AccountState = {
   parsedCount: number;
   warnings: string[];
   error?: string;
+  lastImportSummary?: AccountImportSummary;
   transactions: NormalizedTransaction[];
 };
 
@@ -138,6 +166,7 @@ export function mergePersistedAccounts(previous: AccountState[], persisted: Pers
       parsedCount: previousAccount?.parsedCount ?? 0,
       warnings: previousAccount?.warnings ?? [],
       error: previousAccount?.error,
+      lastImportSummary: previousAccount?.lastImportSummary,
       transactions: mergedTransactions,
     };
   });

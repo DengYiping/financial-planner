@@ -28,6 +28,11 @@ type ValidationResult<T> =
       message: string;
     };
 
+type ImportPayload = {
+  transactions: NormalizedTransaction[];
+  forceImportIndexes?: number[];
+};
+
 function parseRequiredString(value: unknown, fieldName: string, maxLength = 300): ValidationResult<string> {
   if (typeof value !== "string") {
     return { ok: false, message: `${fieldName} must be a string.` };
@@ -173,7 +178,52 @@ function parseTransaction(value: unknown, index: number): ValidationResult<Norma
   };
 }
 
-function validateImportPayload(payload: unknown): ValidationResult<NormalizedTransaction[]> {
+function parseForceImportIndexes(
+  value: unknown,
+  transactionCount: number
+): ValidationResult<number[] | undefined> {
+  if (typeof value === "undefined" || value === null) {
+    return { ok: true, value: undefined };
+  }
+
+  if (!Array.isArray(value)) {
+    return { ok: false, message: "forceImportIndexes must be an array when provided." };
+  }
+
+  const normalizedIndexes: number[] = [];
+  const seenIndexes = new Set<number>();
+
+  for (let index = 0; index < value.length; index += 1) {
+    const entry = value[index];
+    if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 0) {
+      return {
+        ok: false,
+        message: `forceImportIndexes[${index}] must be a non-negative integer.`,
+      };
+    }
+
+    if (entry >= transactionCount) {
+      return {
+        ok: false,
+        message: `forceImportIndexes[${index}] must be less than transactions.length (${transactionCount}).`,
+      };
+    }
+
+    if (seenIndexes.has(entry)) {
+      return {
+        ok: false,
+        message: `forceImportIndexes[${index}] must be unique.`,
+      };
+    }
+
+    seenIndexes.add(entry);
+    normalizedIndexes.push(entry);
+  }
+
+  return { ok: true, value: normalizedIndexes };
+}
+
+function validateImportPayload(payload: unknown): ValidationResult<ImportPayload> {
   if (!isRecord(payload)) {
     return { ok: false, message: "Body must be a JSON object." };
   }
@@ -192,7 +242,18 @@ function validateImportPayload(payload: unknown): ValidationResult<NormalizedTra
     transactions.push(parsed.value);
   }
 
-  return { ok: true, value: transactions };
+  const forceImportIndexes = parseForceImportIndexes(payload.forceImportIndexes, transactions.length);
+  if (!forceImportIndexes.ok) {
+    return forceImportIndexes;
+  }
+
+  return {
+    ok: true,
+    value: {
+      transactions,
+      forceImportIndexes: forceImportIndexes.value,
+    },
+  };
 }
 
 function validateProviderConsistency(
@@ -238,12 +299,18 @@ export async function POST(request: Request, context: RouteContext): Promise<Nex
       return jsonError(404, "account_not_found", "Account was not found.");
     }
 
-    const validatedProviders = validateProviderConsistency(account, validatedPayload.value);
+    const validatedProviders = validateProviderConsistency(account, validatedPayload.value.transactions);
     if (!validatedProviders.ok) {
       return jsonError(400, "provider_mismatch", validatedProviders.message);
     }
 
-    const result = await importTransactionsForAccount(normalizedAccountId, validatedProviders.value);
+    const result = await importTransactionsForAccount(
+      normalizedAccountId,
+      validatedProviders.value,
+      {
+        forceImportIndexes: validatedPayload.value.forceImportIndexes,
+      }
+    );
     return NextResponse.json({
       accountId: normalizedAccountId,
       ...result,

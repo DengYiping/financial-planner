@@ -14,6 +14,7 @@ import {
   getDashboardTransactionsView,
   getAccountById,
   importTransactionsForAccount,
+  previewImportTransactionsForAccount,
   isUniqueConstraintError,
   listAccounts,
   listCategories,
@@ -74,6 +75,49 @@ const normalizedTransactionSchema = z.object({
   reference: z.string().trim().min(1).max(300).optional(),
   raw: z.record(z.string(), z.string()),
 });
+
+const importTransactionsInputSchema = z
+  .object({
+    accountId: accountIdSchema,
+    transactions: z.array(normalizedTransactionSchema),
+    forceImportIndexes: z.array(z.number().int().nonnegative()).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (!value.forceImportIndexes) {
+      return;
+    }
+
+    const seenIndexes = new Set<number>();
+    for (let index = 0; index < value.forceImportIndexes.length; index += 1) {
+      const forceImportIndex = value.forceImportIndexes[index];
+      if (seenIndexes.has(forceImportIndex)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["forceImportIndexes", index],
+          message: `forceImportIndexes[${index}] must be unique.`,
+        });
+      } else {
+        seenIndexes.add(forceImportIndex);
+      }
+
+      if (forceImportIndex >= value.transactions.length) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["forceImportIndexes", index],
+          message: `forceImportIndexes[${index}] must be less than transactions.length (${value.transactions.length}).`,
+        });
+      }
+    }
+  });
+
+const importTransactionsResultSchema = z
+  .object({
+    accountId: z.number().int().positive(),
+    totalCount: z.number().int().nonnegative(),
+    insertedCount: z.number().int().nonnegative(),
+    skippedCount: z.number().int().nonnegative(),
+  })
+  .passthrough();
 
 const persistedAccountSchema = z.object({
   id: z.number().int().positive(),
@@ -259,6 +303,7 @@ const tagSchema = z.object({
 
 type AccountKind = z.infer<typeof accountKindSchema>;
 type TransactionRuleInput = z.infer<typeof transactionRuleInputSchema>;
+type ImportTransactionsInput = z.infer<typeof importTransactionsInputSchema>;
 
 function normalizeOptionalText(value: string | null | undefined): string | undefined {
   if (typeof value !== "string") {
@@ -311,6 +356,23 @@ function toPersistedAccountSnapshot(account: AccountRecord): z.infer<typeof pers
     transactionCount: Math.max(account.transactionCount, account.transactions.length),
     transactions: account.transactions,
   };
+}
+
+function assertTransactionProvidersMatchAccount(
+  transactions: ImportTransactionsInput["transactions"],
+  accountProvider: StatementProvider
+): void {
+  for (let index = 0; index < transactions.length; index += 1) {
+    const transaction = transactions[index];
+    if (transaction.provider !== accountProvider) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message:
+          `transactions[${index}].provider (${transaction.provider}) does not match ` +
+          `account provider (${accountProvider}).`,
+      });
+    }
+  }
 }
 
 export const accountsRouter = createTRPCRouter({
@@ -868,20 +930,14 @@ export const accountsRouter = createTRPCRouter({
       }
     }),
 
-  importTransactions: publicProcedure
-    .input(
-      z.object({
-        accountId: accountIdSchema,
-        transactions: z.array(normalizedTransactionSchema),
-      })
-    )
+  previewImportTransactions: publicProcedure
+    .input(importTransactionsInputSchema)
     .output(
-      z.object({
-        accountId: z.number().int().positive(),
-        totalCount: z.number().int().nonnegative(),
-        insertedCount: z.number().int().nonnegative(),
-        skippedCount: z.number().int().nonnegative(),
-      })
+      z
+        .object({
+          accountId: z.number().int().positive(),
+        })
+        .passthrough()
     )
     .mutation(async ({ input }) => {
       try {
@@ -893,19 +949,46 @@ export const accountsRouter = createTRPCRouter({
           });
         }
 
-        for (let index = 0; index < input.transactions.length; index += 1) {
-          const transaction = input.transactions[index];
-          if (transaction.provider !== account.provider) {
-            throw new TRPCError({
-              code: "BAD_REQUEST",
-              message:
-                `transactions[${index}].provider (${transaction.provider}) does not match ` +
-                `account provider (${account.provider}).`,
-            });
-          }
+        assertTransactionProvidersMatchAccount(input.transactions, account.provider);
+
+        const result = await previewImportTransactionsForAccount(input.accountId, input.transactions, {
+          forceImportIndexes: input.forceImportIndexes,
+        });
+
+        return {
+          accountId: input.accountId,
+          ...result,
+        };
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
         }
 
-        const result = await importTransactionsForAccount(input.accountId, input.transactions);
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to preview import transactions.",
+        });
+      }
+    }),
+
+  importTransactions: publicProcedure
+    .input(importTransactionsInputSchema)
+    .output(importTransactionsResultSchema)
+    .mutation(async ({ input }) => {
+      try {
+        const account = await getAccountById(input.accountId);
+        if (!account) {
+          throw new TRPCError({
+            code: "NOT_FOUND",
+            message: "Account was not found.",
+          });
+        }
+
+        assertTransactionProvidersMatchAccount(input.transactions, account.provider);
+
+        const result = await importTransactionsForAccount(input.accountId, input.transactions, {
+          forceImportIndexes: input.forceImportIndexes,
+        });
         return {
           accountId: input.accountId,
           ...result,

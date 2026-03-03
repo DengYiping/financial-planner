@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import type { NormalizedTransaction, StatementProvider } from "@/lib/parsers/types";
 import {
   accounts,
@@ -11,6 +11,12 @@ import {
   transactions as transactionsTable,
 } from "@/lib/server/db/schema";
 import { getFinanceDb } from "@/lib/server/turso";
+import {
+  analyzeImportDedupe,
+  type ImportConflict,
+  type ImportCoverageSummary,
+  type ImportPreviewResult,
+} from "@/lib/finance/import-dedupe";
 import {
   applyPreparedTransactionRules,
   mapTransactionRuleRow,
@@ -94,10 +100,22 @@ export type CreateAccountInput = {
   color: string;
 };
 
+export type { ImportCoverageSummary, ImportConflict, ImportPreviewResult };
+
+export type ImportTransactionsOptions = {
+  forceImportIndexes?: number[];
+};
+
 export type ImportTransactionsResult = {
   totalCount: number;
   insertedCount: number;
   skippedCount: number;
+  duplicateConflictCount: number;
+  duplicateSkippedCount: number;
+  forcedImportCount: number;
+  autoCancelled: boolean;
+  cancelReason?: "all_unique_keys_already_exist";
+  coverage: ImportCoverageSummary;
 };
 
 export type CreateTransactionForAccountInput = {
@@ -1278,9 +1296,195 @@ export async function reapplyTransactionRulesForAllTransactions(): Promise<Reapp
   };
 }
 
-export async function importTransactionsForAccount(
+type ExistingImportDedupeRow = {
+  sourceId: string;
+  bookingDate: string;
+  amountCents: number;
+  currency: string;
+  direction: "in" | "out";
+  description: string;
+  counterparty?: string;
+  reference?: string;
+};
+
+type PreparedImportCommitRow = {
+  incomingIndex: number;
+  sourceId: string;
+  shouldImport: boolean;
+  forced: boolean;
+  tagIds: number[];
+  values: {
+    accountId: number;
+    sourceId: string;
+    provider: StatementProvider;
+    bookingDate: string;
+    amountCents: number;
+    currency: string;
+    direction: "in" | "out";
+    description: string;
+    categoryId: number | null;
+    counterparty: string | null;
+    reference: string | null;
+    rawJson: string;
+  };
+};
+
+function toEmptyImportCoverageSummary(): ImportCoverageSummary {
+  return {
+    totalIncomingCount: 0,
+    uniqueIncomingCount: 0,
+    existingMatchedUniqueCount: 0,
+    uncoveredUniqueCount: 0,
+    fullyCovered: false,
+  };
+}
+
+function getIncomingBookingDateRange(
+  transactions: NormalizedTransaction[]
+): { minBookingDate: string; maxBookingDate: string } | null {
+  if (transactions.length === 0) {
+    return null;
+  }
+
+  let minBookingDate = transactions[0]!.bookingDate;
+  let maxBookingDate = transactions[0]!.bookingDate;
+
+  for (let index = 1; index < transactions.length; index += 1) {
+    const bookingDate = transactions[index]!.bookingDate;
+    if (bookingDate < minBookingDate) {
+      minBookingDate = bookingDate;
+    }
+    if (bookingDate > maxBookingDate) {
+      maxBookingDate = bookingDate;
+    }
+  }
+
+  return {
+    minBookingDate,
+    maxBookingDate,
+  };
+}
+
+async function listExistingImportDedupeRows(
   accountId: number,
   transactions: NormalizedTransaction[]
+): Promise<ExistingImportDedupeRow[]> {
+  const incomingBookingDateRange = getIncomingBookingDateRange(transactions);
+  if (!incomingBookingDateRange) {
+    return [];
+  }
+
+  const db = getFinanceDb();
+  const rows = await db
+    .select({
+      sourceId: transactionsTable.sourceId,
+      bookingDate: transactionsTable.bookingDate,
+      amountCents: transactionsTable.amountCents,
+      currency: transactionsTable.currency,
+      direction: transactionsTable.direction,
+      description: transactionsTable.description,
+      counterparty: transactionsTable.counterparty,
+      reference: transactionsTable.reference,
+    })
+    .from(transactionsTable)
+    .where(
+      and(
+        eq(transactionsTable.accountId, accountId),
+        gte(transactionsTable.bookingDate, incomingBookingDateRange.minBookingDate),
+        lte(transactionsTable.bookingDate, incomingBookingDateRange.maxBookingDate)
+      )
+    );
+
+  return rows.map((row) => ({
+    sourceId: row.sourceId,
+    bookingDate: row.bookingDate,
+    amountCents: Math.abs(Math.trunc(toNumberValue(row.amountCents))),
+    currency: row.currency,
+    direction: row.direction === "out" ? "out" : "in",
+    description: row.description,
+    counterparty: row.counterparty ?? undefined,
+    reference: row.reference ?? undefined,
+  }));
+}
+
+async function analyzeImportForAccount(
+  accountId: number,
+  transactions: NormalizedTransaction[],
+  forceImportIndexes?: number[]
+): Promise<ReturnType<typeof analyzeImportDedupe>> {
+  if (transactions.length === 0) {
+    return analyzeImportDedupe([], [], forceImportIndexes);
+  }
+
+  const existingRows = await listExistingImportDedupeRows(accountId, transactions);
+  return analyzeImportDedupe(
+    transactions.map((transaction) => ({
+      sourceId: transaction.id,
+      bookingDate: transaction.bookingDate,
+      amountCents: transaction.amountCents,
+      description: transaction.description,
+    })),
+    existingRows,
+    forceImportIndexes
+  );
+}
+
+async function insertForcedImportRowWithSourceIdRetry(
+  row: PreparedImportCommitRow
+): Promise<{ id: number; sourceId: string }> {
+  const db = getFinanceDb();
+  const baseSourceId = row.values.sourceId;
+
+  for (let attempt = 0; attempt < 128; attempt += 1) {
+    const sourceId =
+      attempt === 0 ? baseSourceId : `${baseSourceId}__dup__${row.incomingIndex}__${attempt - 1}`;
+    const insertedRows = await db
+      .insert(transactionsTable)
+      .values({
+        ...row.values,
+        sourceId,
+      })
+      .onConflictDoNothing({
+        target: [transactionsTable.accountId, transactionsTable.sourceId],
+      })
+      .returning({
+        id: transactionsTable.id,
+        sourceId: transactionsTable.sourceId,
+      });
+
+    const inserted = insertedRows[0];
+    if (inserted) {
+      return inserted;
+    }
+  }
+
+  throw new Error(
+    `Unable to insert forced import row for source id '${baseSourceId}' after deterministic collision retries.`
+  );
+}
+
+export async function previewImportTransactionsForAccount(
+  accountId: number,
+  transactions: NormalizedTransaction[],
+  options: ImportTransactionsOptions = {}
+): Promise<ImportPreviewResult> {
+  const previewResult = await analyzeImportForAccount(accountId, transactions, options.forceImportIndexes);
+  return {
+    totalCount: previewResult.totalCount,
+    duplicateConflictCount: previewResult.duplicateConflictCount,
+    duplicateSkippedCount: previewResult.duplicateSkippedCount,
+    forcedImportCount: previewResult.forcedImportCount,
+    autoCancelled: previewResult.autoCancelled,
+    cancelReason: previewResult.cancelReason,
+    coverage: previewResult.coverage,
+    conflicts: previewResult.conflicts,
+  };
+}
+
+export async function importTransactionsForAccount(
+  accountId: number,
+  transactions: NormalizedTransaction[],
+  options: ImportTransactionsOptions = {}
 ): Promise<ImportTransactionsResult> {
   const db = getFinanceDb();
 
@@ -1289,11 +1493,36 @@ export async function importTransactionsForAccount(
       totalCount: 0,
       insertedCount: 0,
       skippedCount: 0,
+      duplicateConflictCount: 0,
+      duplicateSkippedCount: 0,
+      forcedImportCount: 0,
+      autoCancelled: false,
+      coverage: toEmptyImportCoverageSummary(),
     };
   }
 
+  const importPreview = await analyzeImportForAccount(accountId, transactions, options.forceImportIndexes);
+
+  if (importPreview.autoCancelled) {
+    return {
+      totalCount: transactions.length,
+      insertedCount: 0,
+      skippedCount: transactions.length,
+      duplicateConflictCount: importPreview.duplicateConflictCount,
+      duplicateSkippedCount: importPreview.duplicateSkippedCount,
+      forcedImportCount: 0,
+      autoCancelled: true,
+      cancelReason: importPreview.cancelReason,
+      coverage: importPreview.coverage,
+    };
+  }
+
+  const importDecisionsByIndex = new Map(
+    importPreview.decisions.map((decision) => [decision.incomingIndex, decision])
+  );
   const preparedRules = await getPreparedTransactionRules();
-  const preparedRows = transactions.map((transaction) => {
+  const preparedRows = transactions.map((transaction, incomingIndex) => {
+    const decision = importDecisionsByIndex.get(incomingIndex);
     const amountCents = Math.abs(Math.trunc(transaction.amountCents));
     const automationResult = applyPreparedTransactionRules(preparedRules, {
       accountId,
@@ -1305,7 +1534,10 @@ export async function importTransactionsForAccount(
     });
 
     return {
+      incomingIndex,
       sourceId: transaction.id,
+      shouldImport: decision?.shouldImport ?? true,
+      forced: decision?.forced ?? false,
       tagIds: normalizeTagIds(automationResult.tagIds),
       values: {
         accountId,
@@ -1323,31 +1555,55 @@ export async function importTransactionsForAccount(
       },
     };
   });
+  const rowsToInsert = preparedRows.filter((row) => row.shouldImport);
+  const regularRows = rowsToInsert.filter((row) => !row.forced);
+  const forcedRows = rowsToInsert.filter((row) => row.forced);
+
   const tagIdsBySourceId = new Map<string, number[]>();
-  preparedRows.forEach((row) => {
+  regularRows.forEach((row) => {
     if (!tagIdsBySourceId.has(row.sourceId)) {
       tagIdsBySourceId.set(row.sourceId, row.tagIds);
     }
   });
 
-  const insertedRows = await db
-    .insert(transactionsTable)
-    .values(preparedRows.map((row) => row.values))
-    .onConflictDoNothing({
-      target: [transactionsTable.accountId, transactionsTable.sourceId],
-    })
-    .returning({
-      id: transactionsTable.id,
-      sourceId: transactionsTable.sourceId,
-    });
+  const insertedRegularRows =
+    regularRows.length === 0
+      ? []
+      : await db
+          .insert(transactionsTable)
+          .values(regularRows.map((row) => row.values))
+          .onConflictDoNothing({
+            target: [transactionsTable.accountId, transactionsTable.sourceId],
+          })
+          .returning({
+            id: transactionsTable.id,
+            sourceId: transactionsTable.sourceId,
+          });
 
-  const transactionTagRows = insertedRows.flatMap((row) => {
-    const tagIds = tagIdsBySourceId.get(row.sourceId) ?? [];
-    return tagIds.map((tagId) => ({
-      transactionId: row.id,
-      tagId,
-    }));
-  });
+  const forcedTransactionTagRows: Array<{
+    transactionId: number;
+    tagId: number;
+  }> = [];
+
+  for (const forcedRow of forcedRows) {
+    const insertedForcedRow = await insertForcedImportRowWithSourceIdRetry(forcedRow);
+    forcedRow.tagIds.forEach((tagId) => {
+      forcedTransactionTagRows.push({
+        transactionId: insertedForcedRow.id,
+        tagId,
+      });
+    });
+  }
+
+  const transactionTagRows = insertedRegularRows
+    .flatMap((row) => {
+      const tagIds = tagIdsBySourceId.get(row.sourceId) ?? [];
+      return tagIds.map((tagId) => ({
+        transactionId: row.id,
+        tagId,
+      }));
+    })
+    .concat(forcedTransactionTagRows);
 
   if (transactionTagRows.length > 0) {
     await db
@@ -1358,12 +1614,17 @@ export async function importTransactionsForAccount(
       });
   }
 
-  const insertedCount = insertedRows.length;
+  const insertedCount = insertedRegularRows.length + forcedRows.length;
 
   return {
     totalCount: transactions.length,
     insertedCount,
     skippedCount: transactions.length - insertedCount,
+    duplicateConflictCount: importPreview.duplicateConflictCount,
+    duplicateSkippedCount: importPreview.duplicateSkippedCount,
+    forcedImportCount: forcedRows.length,
+    autoCancelled: false,
+    coverage: importPreview.coverage,
   };
 }
 
