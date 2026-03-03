@@ -1,6 +1,7 @@
 "use client";
 
-import { type ChangeEvent, useEffect, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   ACCOUNT_COLORS,
   ACCOUNT_KIND_CONFIG,
@@ -65,6 +66,27 @@ type PendingImportReviewState = UploadCommitContext & {
 };
 
 type UnknownRecord = Record<string, unknown>;
+type SpendingPieSlice = {
+  categoryName: string;
+  spentCents: number;
+  color: string;
+  startPercent: number;
+  endPercent: number;
+  href: string;
+};
+
+const SPENDING_PIE_COLORS = [
+  "#0C8A69",
+  "#0673A6",
+  "#B56A16",
+  "#8E5EA2",
+  "#D14B66",
+  "#2E7867",
+  "#B14747",
+  "#5B7CBA",
+  "#6B8F2A",
+  "#C26D3A",
+];
 
 function isRecord(value: unknown): value is UnknownRecord {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -234,6 +256,25 @@ function buildCommitImportSummary(
   };
 }
 
+function buildSpendingTransactionsHref(month: string, categoryName: string): string {
+  const params = new URLSearchParams();
+  params.set("startMonth", month);
+  params.set("endMonth", month);
+  params.set("category", categoryName);
+  params.set("direction", "outflow");
+  return `/transactions?${params.toString()}`;
+}
+
+function buildSpendingConicGradient(slices: SpendingPieSlice[]): string {
+  if (slices.length === 0) {
+    return "conic-gradient(#d9dde1 0% 100%)";
+  }
+
+  return `conic-gradient(${slices
+    .map((slice) => `${slice.color} ${slice.startPercent.toFixed(2)}% ${slice.endPercent.toFixed(2)}%`)
+    .join(", ")})`;
+}
+
 export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: OverviewContentProps) {
   const [draftKind, setDraftKind] = useState<AccountKind>("aib_current");
   const [draftRevolutCurrency, setDraftRevolutCurrency] = useState<AccountCurrency>("EUR");
@@ -256,8 +297,50 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
   const [dataError, setDataError] = useState<string | null>(null);
   const [pendingImportReview, setPendingImportReview] = useState<PendingImportReviewState | null>(null);
   const [pendingImportReviewError, setPendingImportReviewError] = useState<string | null>(null);
-  const budgetPlannerRows = budgetPlannerViewQuery.data?.rows ?? [];
+  const budgetPlannerRows = budgetPlannerViewQuery.data?.rows ?? initialBudgetPlannerView.rows;
   const budgetPlannerMonth = budgetPlannerViewQuery.data?.month ?? initialBudgetPlannerView.month;
+  const visibleBudgetPlannerRows = useMemo(
+    () => budgetPlannerRows.filter((row) => row.categoryName.trim().toLocaleLowerCase("en-US") !== "excluded"),
+    [budgetPlannerRows]
+  );
+  const spendingPieSlices = useMemo<SpendingPieSlice[]>(() => {
+    const sortedRows = [...visibleBudgetPlannerRows]
+      .filter((row) => row.spentCents > 0)
+      .sort((left, right) => right.spentCents - left.spentCents || left.categoryName.localeCompare(right.categoryName));
+    const totalSpentCents = sortedRows.reduce((sum, row) => sum + row.spentCents, 0);
+
+    let runningShare = 0;
+    return sortedRows.map((row, index) => {
+      const share = totalSpentCents > 0 ? row.spentCents / totalSpentCents : 0;
+      const startPercent = runningShare * 100;
+      const endPercent = index === sortedRows.length - 1 ? 100 : (runningShare + share) * 100;
+      runningShare += share;
+
+      return {
+        categoryName: row.categoryName,
+        spentCents: row.spentCents,
+        color: SPENDING_PIE_COLORS[index % SPENDING_PIE_COLORS.length] ?? "#9ba8b5",
+        startPercent,
+        endPercent,
+        href: buildSpendingTransactionsHref(budgetPlannerMonth, row.categoryName),
+      };
+    });
+  }, [visibleBudgetPlannerRows, budgetPlannerMonth]);
+  const totalSpentEurCents = useMemo(
+    () => visibleBudgetPlannerRows.reduce((sum, row) => sum + row.spentCents, 0),
+    [visibleBudgetPlannerRows]
+  );
+  const spendingShareByCategoryName = useMemo(() => {
+    const byCategory = new Map<string, number>();
+    visibleBudgetPlannerRows.forEach((row) => {
+      if (totalSpentEurCents <= 0) {
+        byCategory.set(row.categoryName, 0);
+        return;
+      }
+      byCategory.set(row.categoryName, row.spentCents / totalSpentEurCents);
+    });
+    return byCategory;
+  }, [visibleBudgetPlannerRows, totalSpentEurCents]);
 
   const isHydratingData = accountsQuery.isPending && accounts.length === 0;
   const isCreatingAccount = createAccountMutation.isPending;
@@ -924,30 +1007,91 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
             subtitle={`Category statistics from ${formatMonthLabel(
               budgetPlannerMonth
             )} (excluding current month).`}
+            action={
+              <Link
+                href="/statistics"
+                className="rounded-full border border-accent/35 bg-accent/10 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.1em] text-accent transition hover:bg-accent/20"
+              >
+                Open Statistics Page
+              </Link>
+            }
           >
             <p className="mb-3 inline-flex items-center rounded-full border border-ink-soft/20 bg-surface px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em] text-muted">
               Calculated Month: {formatMonthLabel(budgetPlannerMonth)}
             </p>
-            {budgetPlannerRows.length === 0 ? (
+            {visibleBudgetPlannerRows.length === 0 ? (
               <p className="rounded-2xl border border-ink-soft/15 bg-surface p-4 text-sm text-muted">
                 No spending transactions found for {formatMonthLabel(budgetPlannerMonth)}.
               </p>
             ) : (
               <div className="space-y-3">
-                {budgetPlannerRows.map((row) => {
-                  const totalLabel = formatCurrencyCents(row.spentCents, row.currency, "en-IE");
+                {spendingPieSlices.length > 0 ? (
+                  <article className="rounded-2xl border border-ink-soft/15 bg-surface p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.1em] text-muted">
+                      Spending Breakdown
+                    </p>
+                    <div className="mt-3 flex flex-wrap items-center gap-4">
+                      <div
+                        className="relative h-32 w-32 shrink-0 rounded-full border border-ink-soft/20"
+                        style={{ background: buildSpendingConicGradient(spendingPieSlices) }}
+                        aria-label="Spending distribution pie chart in EUR"
+                      >
+                        <div className="absolute inset-5 flex items-center justify-center rounded-full border border-ink-soft/15 bg-surface">
+                          <div className="text-center">
+                            <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">Total</p>
+                            <p className="font-mono text-xs text-foreground">
+                              {formatCurrencyCents(totalSpentEurCents, "EUR", "en-IE")}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                      <ul className="min-w-0 flex-1 space-y-1">
+                        {spendingPieSlices.slice(0, 8).map((slice) => (
+                          <li key={`spending-pie-${slice.categoryName}`} className="flex items-center gap-2">
+                            <span
+                              className="h-2.5 w-2.5 shrink-0 rounded-full"
+                              style={{ backgroundColor: slice.color }}
+                              aria-hidden
+                            />
+                            <Link
+                              href={slice.href}
+                              className="min-w-0 truncate text-xs font-semibold text-foreground underline decoration-ink-soft/30 underline-offset-4 transition hover:decoration-accent"
+                              title={`View ${slice.categoryName} transactions`}
+                            >
+                              {slice.categoryName}
+                            </Link>
+                            <span className="ml-auto shrink-0 font-mono text-xs text-muted">
+                              {formatCurrencyCents(slice.spentCents, "EUR", "en-IE")}
+                            </span>
+                          </li>
+                        ))}
+                        {spendingPieSlices.length > 8 ? (
+                          <li className="text-[11px] text-muted">+{spendingPieSlices.length - 8} more categories</li>
+                        ) : null}
+                      </ul>
+                    </div>
+                  </article>
+                ) : null}
+                {visibleBudgetPlannerRows.map((row) => {
+                  const totalLabel = formatCurrencyCents(row.spentCents, "EUR", "en-IE");
                   const averageCents =
                     row.transactionCount > 0 ? Math.round(row.spentCents / row.transactionCount) : 0;
-                  const averageLabel = formatCurrencyCents(averageCents, row.currency, "en-IE");
+                  const averageLabel = formatCurrencyCents(averageCents, "EUR", "en-IE");
+                  const share = spendingShareByCategoryName.get(row.categoryName) ?? 0;
+                  const sharePercent = Math.max(0, Math.min(share * 100, 100));
+                  const transactionHref = buildSpendingTransactionsHref(budgetPlannerMonth, row.categoryName);
                   return (
-                    <article
-                      key={`${row.categoryName}-${row.currency}`}
-                      className="rounded-2xl border border-ink-soft/15 bg-surface p-4"
-                    >
+                    <article key={row.categoryName} className="rounded-2xl border border-ink-soft/15 bg-surface p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div>
-                          <h3 className="text-sm font-semibold text-foreground">{row.categoryName}</h3>
-                          <p className="mt-1 text-xs text-muted">{row.currency}</p>
+                          <h3 className="text-sm font-semibold text-foreground">
+                            <Link
+                              href={transactionHref}
+                              className="underline decoration-ink-soft/30 underline-offset-4 transition hover:decoration-accent"
+                            >
+                              {row.categoryName}
+                            </Link>
+                          </h3>
                         </div>
                         <p className="font-mono text-sm text-foreground">{totalLabel}</p>
                       </div>
@@ -957,6 +1101,17 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                         </p>
                         <p>
                           Avg / transaction: <span className="font-semibold text-foreground">{averageLabel}</span>
+                        </p>
+                      </div>
+                      <div className="mt-3">
+                        <div className="h-2 w-full overflow-hidden rounded-full bg-ink-soft/15">
+                          <div
+                            className="h-full rounded-full bg-accent/70"
+                            style={{ width: `${sharePercent.toFixed(2)}%` }}
+                          />
+                        </div>
+                        <p className="mt-1 text-[11px] text-muted">
+                          {sharePercent.toFixed(1)}% of total {formatCurrencyCents(totalSpentEurCents, "EUR", "en-IE")}
                         </p>
                       </div>
                     </article>

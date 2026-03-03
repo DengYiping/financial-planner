@@ -28,9 +28,12 @@ type TransactionsView = RouterOutputs["accounts"]["transactionsView"];
 type TransactionRow = TransactionsView["transactions"][number];
 type PersistedAccount = RouterOutputs["accounts"]["list"][number];
 type PersistedCategory = RouterOutputs["accounts"]["listCategories"][number];
+type TransactionDirectionFilter = "all" | "inflow" | "outflow";
 
 type TransactionsContentProps = {
   view: TransactionsView;
+  initialSelectedCategory?: string;
+  initialDirectionFilter?: TransactionDirectionFilter;
 };
 
 type EditableTransactionDraft = {
@@ -269,6 +272,10 @@ function getCategoryLabel(row: TransactionRow): string {
   return row.transaction.categoryHint ?? "Uncategorized";
 }
 
+function getTransactionSelectionKey(row: TransactionRow): string {
+  return `${row.accountId}::${row.transaction.id}`;
+}
+
 function centsToAmountInput(amountCents: number): string {
   return (Math.abs(amountCents) / 100).toFixed(2);
 }
@@ -465,15 +472,29 @@ function parseCreateRulePayload(draft: RuleFromTransactionDraft): ParseCreateRul
   };
 }
 
-export function TransactionsContent({ view }: TransactionsContentProps) {
+export function TransactionsContent({
+  view,
+  initialSelectedCategory,
+  initialDirectionFilter = "all",
+}: TransactionsContentProps) {
   const router = useRouter();
   const pathname = usePathname();
   const [isMounted, setIsMounted] = useState(false);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [descriptionSearchTerm, setDescriptionSearchTerm] = useState("");
   const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
-  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>(() =>
+    initialSelectedCategory ? [initialSelectedCategory] : []
+  );
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [selectedDirectionFilter, setSelectedDirectionFilter] =
+    useState<TransactionDirectionFilter>(initialDirectionFilter);
+  const [selectedTransactionKeys, setSelectedTransactionKeys] = useState<Set<string>>(new Set());
+  const [batchCategorySelection, setBatchCategorySelection] = useState("");
+  const [batchTagSelections, setBatchTagSelections] = useState<number[]>([]);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [batchNotice, setBatchNotice] = useState<string | null>(null);
+  const [isBatchApplying, setIsBatchApplying] = useState(false);
   const [accountFilterOpen, setAccountFilterOpen] = useState(false);
   const [categoryFilterOpen, setCategoryFilterOpen] = useState(false);
   const [tagFilterOpen, setTagFilterOpen] = useState(false);
@@ -496,6 +517,27 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
   useEffect(() => {
     setIsMounted(true);
   }, []);
+
+  useEffect(() => {
+    setSelectedCategories(initialSelectedCategory ? [initialSelectedCategory] : []);
+  }, [initialSelectedCategory]);
+
+  useEffect(() => {
+    setSelectedDirectionFilter(initialDirectionFilter);
+  }, [initialDirectionFilter]);
+
+  useEffect(() => {
+    const validKeys = new Set(view.transactions.map((row) => getTransactionSelectionKey(row)));
+    setSelectedTransactionKeys((current) => {
+      const next = new Set<string>();
+      current.forEach((key) => {
+        if (validKeys.has(key)) {
+          next.add(key);
+        }
+      });
+      return next;
+    });
+  }, [view.transactions]);
 
   useEffect(() => {
     if (!transactionModal) {
@@ -669,6 +711,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     setSelectedAccounts([]);
     setSelectedCategories([]);
     setSelectedTags([]);
+    setSelectedDirectionFilter("all");
     setAccountFilterOpen(false);
     setCategoryFilterOpen(false);
     setTagFilterOpen(false);
@@ -1118,6 +1161,13 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
         }
       }
 
+      if (selectedDirectionFilter === "inflow" && row.transaction.direction !== "in") {
+        return false;
+      }
+      if (selectedDirectionFilter === "outflow" && row.transaction.direction !== "out") {
+        return false;
+      }
+
       return true;
     });
   }, [
@@ -1125,9 +1175,225 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     selectedAccounts,
     selectedCategories,
     selectedTags,
+    selectedDirectionFilter,
     rowTagNames,
     view.transactions,
   ]);
+
+  const transactionBySelectionKey = useMemo(() => {
+    const byKey = new Map<string, TransactionRow>();
+    view.transactions.forEach((row) => {
+      byKey.set(getTransactionSelectionKey(row), row);
+    });
+    return byKey;
+  }, [view.transactions]);
+
+  const filteredSelectionKeys = useMemo(
+    () => filteredTransactions.map((row) => getTransactionSelectionKey(row)),
+    [filteredTransactions]
+  );
+
+  const selectedTransactionRows = useMemo(() => {
+    return Array.from(selectedTransactionKeys)
+      .map((key) => transactionBySelectionKey.get(key))
+      .filter((row): row is TransactionRow => Boolean(row));
+  }, [selectedTransactionKeys, transactionBySelectionKey]);
+
+  const selectedFilteredCount = useMemo(
+    () => filteredSelectionKeys.filter((key) => selectedTransactionKeys.has(key)).length,
+    [filteredSelectionKeys, selectedTransactionKeys]
+  );
+  const allFilteredSelected =
+    filteredSelectionKeys.length > 0 && selectedFilteredCount === filteredSelectionKeys.length;
+
+  const batchTagChoices = useMemo(() => tagChoices.filter((tag) => tag.id > 0), [tagChoices]);
+
+  function toggleTransactionSelection(row: TransactionRow): void {
+    const key = getTransactionSelectionKey(row);
+    setSelectedTransactionKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectAllFilteredTransactions(): void {
+    setSelectedTransactionKeys((current) => {
+      const next = new Set(current);
+      if (allFilteredSelected) {
+        filteredSelectionKeys.forEach((key) => {
+          next.delete(key);
+        });
+      } else {
+        filteredSelectionKeys.forEach((key) => {
+          next.add(key);
+        });
+      }
+      return next;
+    });
+  }
+
+  function clearTransactionSelection(): void {
+    setSelectedTransactionKeys(new Set());
+  }
+
+  async function handleBatchApplyCategory(): Promise<void> {
+    if (isBatchApplying) {
+      return;
+    }
+    if (selectedTransactionRows.length === 0) {
+      setBatchError("Select at least one transaction row to apply a category.");
+      setBatchNotice(null);
+      return;
+    }
+    if (batchCategorySelection.length === 0) {
+      setBatchError('Choose a category first (or "Uncategorized").');
+      setBatchNotice(null);
+      return;
+    }
+
+    const parsedCategoryId = Number.parseInt(batchCategorySelection, 10);
+    const nextCategoryId =
+      batchCategorySelection === "uncategorized"
+        ? undefined
+        : Number.isInteger(parsedCategoryId) && parsedCategoryId > 0
+        ? parsedCategoryId
+        : null;
+    if (nextCategoryId === null) {
+      setBatchError("Selected category is invalid.");
+      setBatchNotice(null);
+      return;
+    }
+
+    setIsBatchApplying(true);
+    setBatchError(null);
+    setBatchNotice(null);
+
+    let updatedCount = 0;
+    let failedCount = 0;
+    let firstFailureMessage: string | undefined;
+
+    for (const row of selectedTransactionRows) {
+      try {
+        const preservedTagIds = getTransactionTagIds(row.transaction);
+        await updateTransactionMutation.mutateAsync({
+          accountId: row.accountId,
+          transactionId: row.transaction.id,
+          bookingDate: row.transaction.bookingDate,
+          amountCents: Math.abs(Math.trunc(row.transaction.amountCents)),
+          currency: row.transaction.currency,
+          direction: row.transaction.direction,
+          description: row.transaction.description,
+          categoryId: nextCategoryId,
+          tagIds: preservedTagIds.length > 0 ? preservedTagIds : undefined,
+          counterparty: row.transaction.counterparty ?? undefined,
+          reference: row.transaction.reference ?? undefined,
+        });
+        updatedCount += 1;
+      } catch (error) {
+        failedCount += 1;
+        if (!firstFailureMessage) {
+          firstFailureMessage = resolveErrorMessage(error, "Could not apply batch category update.");
+        }
+      }
+    }
+
+    setIsBatchApplying(false);
+    router.refresh();
+
+    if (updatedCount > 0) {
+      setBatchNotice(
+        `Applied category to ${updatedCount} transaction${updatedCount === 1 ? "" : "s"}.`
+      );
+    }
+    if (failedCount > 0) {
+      setBatchError(
+        `Failed to update ${failedCount} transaction${failedCount === 1 ? "" : "s"}${
+          firstFailureMessage ? `: ${firstFailureMessage}` : "."
+        }`
+      );
+    }
+    if (failedCount === 0) {
+      setSelectedTransactionKeys(new Set());
+    }
+  }
+
+  async function handleBatchApplyTags(): Promise<void> {
+    if (isBatchApplying) {
+      return;
+    }
+    if (selectedTransactionRows.length === 0) {
+      setBatchError("Select at least one transaction row to apply tags.");
+      setBatchNotice(null);
+      return;
+    }
+
+    const nextTagIds = Array.from(
+      new Set(batchTagSelections.filter((tagId) => Number.isInteger(tagId) && tagId > 0))
+    ).sort((left, right) => left - right);
+
+    if (nextTagIds.length === 0) {
+      setBatchError("Choose at least one tag first.");
+      setBatchNotice(null);
+      return;
+    }
+
+    setIsBatchApplying(true);
+    setBatchError(null);
+    setBatchNotice(null);
+
+    let updatedCount = 0;
+    let failedCount = 0;
+    let firstFailureMessage: string | undefined;
+
+    for (const row of selectedTransactionRows) {
+      try {
+        await updateTransactionMutation.mutateAsync({
+          accountId: row.accountId,
+          transactionId: row.transaction.id,
+          bookingDate: row.transaction.bookingDate,
+          amountCents: Math.abs(Math.trunc(row.transaction.amountCents)),
+          currency: row.transaction.currency,
+          direction: row.transaction.direction,
+          description: row.transaction.description,
+          categoryId:
+            typeof row.transaction.categoryId === "number" && row.transaction.categoryId > 0
+              ? row.transaction.categoryId
+              : undefined,
+          tagIds: nextTagIds,
+          counterparty: row.transaction.counterparty ?? undefined,
+          reference: row.transaction.reference ?? undefined,
+        });
+        updatedCount += 1;
+      } catch (error) {
+        failedCount += 1;
+        if (!firstFailureMessage) {
+          firstFailureMessage = resolveErrorMessage(error, "Could not apply batch tag update.");
+        }
+      }
+    }
+
+    setIsBatchApplying(false);
+    router.refresh();
+
+    if (updatedCount > 0) {
+      setBatchNotice(`Applied tags to ${updatedCount} transaction${updatedCount === 1 ? "" : "s"}.`);
+    }
+    if (failedCount > 0) {
+      setBatchError(
+        `Failed to update ${failedCount} transaction${failedCount === 1 ? "" : "s"}${
+          firstFailureMessage ? `: ${firstFailureMessage}` : "."
+        }`
+      );
+    }
+    if (failedCount === 0) {
+      setSelectedTransactionKeys(new Set());
+    }
+  }
 
   const columns = useMemo<ColumnDef<TransactionRow>[]>(
     () => [
@@ -1249,6 +1515,12 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
     const params = new URLSearchParams();
     params.set("startMonth", startMonth);
     params.set("endMonth", endMonth);
+    if (selectedCategories.length === 1) {
+      params.set("category", selectedCategories[0] ?? "");
+    }
+    if (selectedDirectionFilter !== "all") {
+      params.set("direction", selectedDirectionFilter);
+    }
     router.replace(`${pathname}?${params.toString()}`, { scroll: false });
   }
 
@@ -1469,7 +1741,8 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                     descriptionSearchTerm.trim().length === 0 &&
                     selectedAccounts.length === 0 &&
                     selectedCategories.length === 0 &&
-                    selectedTags.length === 0
+                    selectedTags.length === 0 &&
+                    selectedDirectionFilter === "all"
                   }
                   className="rounded-full border border-ink-soft/20 px-3 py-2 text-xs font-semibold uppercase tracking-[0.08em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
                 >
@@ -1533,6 +1806,31 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                 </select>
               </label>
 
+              <div className="inline-flex items-center gap-1 rounded-full border border-ink-soft/20 bg-surface p-1">
+                {(
+                  [
+                    { id: "all", label: "All" },
+                    { id: "outflow", label: "Outflow" },
+                    { id: "inflow", label: "Inflow" },
+                  ] satisfies Array<{ id: TransactionDirectionFilter; label: string }>
+                ).map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedDirectionFilter(option.id);
+                    }}
+                    className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em] transition ${
+                      selectedDirectionFilter === option.id
+                        ? "border border-accent/40 bg-accent/10 text-accent"
+                        : "text-muted hover:text-foreground"
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+
               {selectedAccounts.map((accountName) => (
                 <button
                   key={`account-${accountName}`}
@@ -1583,8 +1881,139 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                   <span className="text-muted">x</span>
                 </button>
               ))}
+              {selectedDirectionFilter !== "all" ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedDirectionFilter("all");
+                  }}
+                  className="inline-flex items-center gap-2 rounded-full border border-ink-soft/20 bg-surface px-3 py-1 text-xs font-semibold text-foreground transition hover:border-ink-soft/35"
+                  title="Remove direction filter"
+                >
+                  <span className="text-muted">Direction</span>
+                  {selectedDirectionFilter}
+                  <span className="text-muted">x</span>
+                </button>
+              ) : null}
             </div>
           </div>
+        </div>
+
+        <div className="mb-4 rounded-2xl border border-ink-soft/15 bg-surface/80 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+              Row Selection:{" "}
+              <span className="text-foreground">
+                {selectedTransactionRows.length} selected
+                {selectedFilteredCount > 0 && selectedFilteredCount !== selectedTransactionRows.length
+                  ? ` (${selectedFilteredCount} in current view)`
+                  : ""}
+              </span>
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={toggleSelectAllFilteredTransactions}
+                disabled={filteredSelectionKeys.length === 0 || isBatchApplying}
+                className="rounded-full border border-ink-soft/20 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {allFilteredSelected ? "Unselect View" : "Select View"}
+              </button>
+              <button
+                type="button"
+                onClick={clearTransactionSelection}
+                disabled={selectedTransactionRows.length === 0 || isBatchApplying}
+                className="rounded-full border border-ink-soft/20 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.1em] text-muted transition hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                Clear Selection
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <div className="rounded-xl border border-ink-soft/15 bg-surface p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">Batch Category</p>
+              <div className="mt-2 flex items-center gap-2">
+                <select
+                  value={batchCategorySelection}
+                  onChange={(event) => {
+                    setBatchCategorySelection(event.target.value);
+                  }}
+                  disabled={isBatchApplying}
+                  className="w-full rounded-full border border-ink-soft/20 bg-surface px-3 py-2 text-xs text-foreground outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <option value="">Choose category...</option>
+                  <option value="uncategorized">Uncategorized</option>
+                  {categoryChoices.map((category) => (
+                    <option key={category.id} value={String(category.id)}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleBatchApplyCategory();
+                  }}
+                  disabled={isBatchApplying || selectedTransactionRows.length === 0}
+                  className="rounded-full border border-accent/40 bg-accent/10 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  Apply
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-ink-soft/15 bg-surface p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">Batch Tags</p>
+              <div className="mt-2 flex items-start gap-2">
+                <select
+                  multiple
+                  value={batchTagSelections.map((tagId) => String(tagId))}
+                  onChange={(event) => {
+                    const selectedTagIds = Array.from(event.target.selectedOptions)
+                      .map((option) => Number.parseInt(option.value, 10))
+                      .filter((tagId) => Number.isInteger(tagId) && tagId > 0);
+                    setBatchTagSelections(selectedTagIds);
+                  }}
+                  disabled={isBatchApplying}
+                  className="h-20 w-full rounded-xl border border-ink-soft/20 bg-surface px-2 py-1 text-xs text-foreground outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {batchTagChoices.length === 0 ? (
+                    <option value="" disabled>
+                      No tags available
+                    </option>
+                  ) : (
+                    batchTagChoices.map((tag) => (
+                      <option key={tag.id} value={String(tag.id)}>
+                        {tag.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleBatchApplyTags();
+                  }}
+                  disabled={isBatchApplying || selectedTransactionRows.length === 0}
+                  className="rounded-full border border-accent/40 bg-accent/10 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-accent transition hover:bg-accent/20 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  Apply
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {batchError ? (
+            <p className="mt-3 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+              {batchError}
+            </p>
+          ) : null}
+          {batchNotice ? (
+            <p className="mt-3 rounded-xl border border-positive/35 bg-positive/10 px-3 py-2 text-xs text-positive">
+              {batchNotice}
+            </p>
+          ) : null}
         </div>
 
         <div className="overflow-x-auto">
@@ -1592,6 +2021,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
             <thead className="text-left text-xs uppercase tracking-[0.14em] text-muted">
               {table.getHeaderGroups().map((headerGroup) => (
                 <tr key={headerGroup.id}>
+                  <th className="px-3 py-2">Select</th>
                   {headerGroup.headers.map((header) => {
                     const isAmount = header.column.id === "amount";
                     const sorted = header.column.getIsSorted();
@@ -1625,7 +2055,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
               {table.getRowModel().rows.length === 0 ? (
                 <tr className="rounded-2xl bg-surface">
                   <td
-                    colSpan={6}
+                    colSpan={table.getAllLeafColumns().length + 1}
                     className="rounded-xl border border-ink-soft/15 px-3 py-6 text-center text-sm text-muted"
                   >
                     No transactions found. Add accounts and upload statement files on the Overview tab.
@@ -1633,16 +2063,26 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                 </tr>
               ) : (
                 table.getRowModel().rows.map((row) => {
+                  const rowSelectionKey = getTransactionSelectionKey(row.original);
+                  const isRowSelected = selectedTransactionKeys.has(rowSelectionKey);
                   return (
                     <tr
                       key={row.id}
-                      className="rounded-2xl bg-surface transition hover:bg-surface/70"
+                      className={`rounded-2xl bg-surface transition hover:bg-surface/70 ${
+                        isRowSelected ? "ring-1 ring-accent/40" : ""
+                      }`}
                       role="button"
                       tabIndex={0}
                       onClick={() => {
+                        if (isBatchApplying) {
+                          return;
+                        }
                         openEditModal(row.original);
                       }}
                       onKeyDown={(event) => {
+                        if (isBatchApplying) {
+                          return;
+                        }
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
                           openEditModal(row.original);
@@ -1650,6 +2090,26 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                       }}
                       aria-label={`Edit transaction ${row.original.transaction.description}`}
                     >
+                      <td
+                        className="rounded-l-xl border border-r-0 border-ink-soft/15 px-3 py-3"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isRowSelected}
+                          disabled={isBatchApplying}
+                          onChange={() => {
+                            toggleTransactionSelection(row.original);
+                          }}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                          }}
+                          aria-label={`Select transaction ${row.original.transaction.description}`}
+                          className="h-4 w-4 rounded border-ink-soft/30"
+                        />
+                      </td>
                       {row.getVisibleCells().map((cell) => {
                         const isDescription = cell.column.id === "description";
                         const isCategory = cell.column.id === "category";
@@ -1664,7 +2124,7 @@ export function TransactionsContent({ view }: TransactionsContentProps) {
                             key={cell.id}
                             className={[
                               "border-ink-soft/15 px-3 py-3",
-                              isDescription && "rounded-l-xl border border-r-0 text-sm text-foreground",
+                              isDescription && "border-y text-sm text-foreground",
                               isCategory && "border-y text-sm text-muted",
                               isTags && "border-y text-sm",
                               isAccount && "border-y text-sm text-foreground",

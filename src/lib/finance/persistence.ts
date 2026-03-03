@@ -29,6 +29,8 @@ import {
 } from "@/lib/finance/rules";
 
 const MONTH_KEY_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+const USD_TO_EUR_RATE_NUMERATOR = 92;
+const USD_TO_EUR_RATE_DENOMINATOR = 100;
 
 type AccountSummaryRecord = {
   id: number;
@@ -100,6 +102,16 @@ export type DashboardBudgetPlannerRow = {
 
 export type DashboardBudgetPlannerView = {
   month: string;
+  rows: DashboardBudgetPlannerRow[];
+};
+
+export type DashboardSpendingStatsViewInput = {
+  month?: string;
+};
+
+export type DashboardSpendingStatsView = {
+  monthOptions: string[];
+  selectedMonth?: string;
   rows: DashboardBudgetPlannerRow[];
 };
 
@@ -868,18 +880,21 @@ export async function getDashboardSummaryView(input: DashboardSummaryViewInput):
   };
 }
 
-export async function getDashboardBudgetPlannerView(): Promise<DashboardBudgetPlannerView> {
+async function listDashboardSpendingRowsForMonth(month: string): Promise<DashboardBudgetPlannerRow[]> {
   const db = getFinanceDb();
-  const month = getPreviousMonthKey();
   const categoryNameExpr = sql<string>`coalesce(${categories.name}, 'Uncategorized')`;
-  const spentCentsExpr =
-    sql<number>`coalesce(sum(case when ${transactionsTable.direction} = 'out' then ${transactionsTable.amountCents} else 0 end), 0)`;
+  const normalizedCategoryNameExpr = sql<string>`lower(trim(coalesce(${categories.name}, '')))`;
+  const amountEurCentsExpr = sql<number>`case
+    when ${transactionsTable.currency} = 'EUR' then ${transactionsTable.amountCents}
+    when ${transactionsTable.currency} = 'USD' then cast(round((${transactionsTable.amountCents} * ${USD_TO_EUR_RATE_NUMERATOR}) / ${USD_TO_EUR_RATE_DENOMINATOR}) as integer)
+    else ${transactionsTable.amountCents}
+  end`;
+  const spentCentsExpr = sql<number>`coalesce(sum(${amountEurCentsExpr}), 0)`;
   const transactionCountExpr = sql<number>`count(${transactionsTable.id})`;
 
   const rows = await db
     .select({
       categoryName: categoryNameExpr,
-      currency: transactionsTable.currency,
       spentCents: spentCentsExpr,
       transactionCount: transactionCountExpr,
     })
@@ -888,20 +903,51 @@ export async function getDashboardBudgetPlannerView(): Promise<DashboardBudgetPl
     .where(
       and(
         eq(transactionsTable.direction, "out"),
-        sql`substr(${transactionsTable.bookingDate}, 1, 7) = ${month}`
+        sql`substr(${transactionsTable.bookingDate}, 1, 7) = ${month}`,
+        sql`${normalizedCategoryNameExpr} <> 'excluded'`
       )
     )
-    .groupBy(categoryNameExpr, transactionsTable.currency)
-    .orderBy(desc(spentCentsExpr), desc(transactionCountExpr), asc(categoryNameExpr), asc(transactionsTable.currency));
+    .groupBy(categoryNameExpr)
+    .orderBy(desc(spentCentsExpr), desc(transactionCountExpr), asc(categoryNameExpr));
+
+  return rows.map((row) => ({
+    categoryName: row.categoryName,
+    currency: "EUR",
+    spentCents: Math.max(0, Math.trunc(toNumberValue(row.spentCents))),
+    transactionCount: Math.max(0, Math.trunc(toNumberValue(row.transactionCount))),
+  }));
+}
+
+export async function getDashboardBudgetPlannerView(): Promise<DashboardBudgetPlannerView> {
+  const month = getPreviousMonthKey();
+  const rows = await listDashboardSpendingRowsForMonth(month);
 
   return {
     month,
-    rows: rows.map((row) => ({
-      categoryName: row.categoryName,
-      currency: row.currency,
-      spentCents: Math.max(0, Math.trunc(toNumberValue(row.spentCents))),
-      transactionCount: Math.max(0, Math.trunc(toNumberValue(row.transactionCount))),
-    })),
+    rows,
+  };
+}
+
+export async function getDashboardSpendingStatsView(
+  input: DashboardSpendingStatsViewInput
+): Promise<DashboardSpendingStatsView> {
+  const monthOptions = await listTransactionMonthOptions();
+  const selectedMonth =
+    monthOptions.length === 0 ? undefined : input.month && monthOptions.includes(input.month) ? input.month : monthOptions[0];
+
+  if (!selectedMonth) {
+    return {
+      monthOptions,
+      selectedMonth: undefined,
+      rows: [],
+    };
+  }
+
+  const rows = await listDashboardSpendingRowsForMonth(selectedMonth);
+  return {
+    monthOptions,
+    selectedMonth,
+    rows,
   };
 }
 
