@@ -33,27 +33,23 @@ import {
   type AccountRecord,
 } from "@/lib/finance/persistence";
 import {
+  accountCurrencySchema,
+  accountIdSchema,
+  accountKindSchema,
+  createAccountInputSchema,
+  importTransactionsInputSchema,
+  normalizedTransactionSchema,
+  statementProviderSchema,
+} from "@/lib/finance/request-schemas";
+import {
   TransactionRuleValidationError,
   type TransactionRuleWriteInput,
 } from "@/lib/finance/rules";
 import type { StatementProvider } from "@/lib/parsers/types";
 import { createTRPCRouter, publicProcedure } from "@/server/api/trpc";
 
-const ACCOUNT_KIND_VALUES = [
-  "aib_current",
-  "aib_mortgage",
-  "revolut_current",
-  "revolut_credit_card",
-] as const;
-const ACCOUNT_CURRENCY_VALUES = ["EUR", "USD"] as const;
-
-const accountKindSchema = z.enum(ACCOUNT_KIND_VALUES);
-const accountCurrencySchema = z.enum(ACCOUNT_CURRENCY_VALUES);
-const statementProviderSchema = z.enum(["aib", "revolut"]);
-const accountIdSchema = z.number().int().positive();
 const bookingDateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const monthKeyRegex = /^\d{4}-(0[1-9]|1[0-2])$/;
-const hexColorRegex = /^#(?:[0-9a-fA-F]{3}){1,2}$/;
 const monthKeySchema = z.string().regex(monthKeyRegex);
 const categoryNameSchema = z.string().trim().min(1).max(120);
 const tagNameSchema = z.string().trim().min(1).max(120);
@@ -61,59 +57,6 @@ const tagReferenceSchema = z.object({
   id: accountIdSchema,
   name: tagNameSchema,
 });
-
-const normalizedTransactionSchema = z.object({
-  id: z.string().trim().min(1).max(160),
-  provider: statementProviderSchema,
-  bookingDate: z.string().trim().regex(bookingDateRegex, "bookingDate must use YYYY-MM-DD format."),
-  deemedDate: z.string().trim().regex(bookingDateRegex, "deemedDate must use YYYY-MM-DD format.").optional(),
-  amountCents: z.number().int().positive(),
-  currency: z.string().trim().min(1).max(16),
-  direction: z.enum(["in", "out"]),
-  description: z.string().trim().min(1).max(500),
-  categoryId: accountIdSchema.optional(),
-  categoryHint: z.string().trim().min(1).max(120).optional(),
-  tags: z.array(tagReferenceSchema).max(500).optional(),
-  tagIds: z.array(accountIdSchema).max(500).optional(),
-  tagHints: z.array(tagNameSchema).max(500).optional(),
-  counterparty: z.string().trim().min(1).max(300).optional(),
-  reference: z.string().trim().min(1).max(300).optional(),
-  raw: z.record(z.string(), z.string()),
-});
-
-const importTransactionsInputSchema = z
-  .object({
-    accountId: accountIdSchema,
-    transactions: z.array(normalizedTransactionSchema),
-    forceImportIndexes: z.array(z.number().int().nonnegative()).optional(),
-  })
-  .superRefine((value, ctx) => {
-    if (!value.forceImportIndexes) {
-      return;
-    }
-
-    const seenIndexes = new Set<number>();
-    for (let index = 0; index < value.forceImportIndexes.length; index += 1) {
-      const forceImportIndex = value.forceImportIndexes[index];
-      if (seenIndexes.has(forceImportIndex)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["forceImportIndexes", index],
-          message: `forceImportIndexes[${index}] must be unique.`,
-        });
-      } else {
-        seenIndexes.add(forceImportIndex);
-      }
-
-      if (forceImportIndex >= value.transactions.length) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["forceImportIndexes", index],
-          message: `forceImportIndexes[${index}] must be less than transactions.length (${value.transactions.length}).`,
-        });
-      }
-    }
-  });
 
 const importTransactionsResultSchema = z
   .object({
@@ -362,7 +305,6 @@ const tagSchema = z.object({
   updatedAt: z.string(),
 });
 
-type AccountKind = z.infer<typeof accountKindSchema>;
 type TransactionRuleInput = z.infer<typeof transactionRuleInputSchema>;
 type ImportTransactionsInput = z.infer<typeof importTransactionsInputSchema>;
 
@@ -388,14 +330,6 @@ function toTransactionRuleWriteInput(input: TransactionRuleInput): TransactionRu
     assignCounterpartyFromRegexGroup: input.assignCounterpartyFromRegexGroup ?? false,
     priority: input.priority,
   };
-}
-
-function expectedProviderForKind(kind: AccountKind): StatementProvider {
-  if (kind === "aib_current" || kind === "aib_mortgage") {
-    return "aib";
-  }
-
-  return "revolut";
 }
 
 function toPersistedAccountSnapshot(account: AccountRecord): z.infer<typeof persistedAccountSchema> | null {
@@ -453,26 +387,9 @@ export const accountsRouter = createTRPCRouter({
   }),
 
   create: publicProcedure
-    .input(
-      z.object({
-        id: z.number().int().positive().optional(),
-        name: z.string().trim().min(1).max(120),
-        kind: accountKindSchema,
-        provider: statementProviderSchema,
-        currency: accountCurrencySchema.nullish(),
-        color: z.string().trim().regex(hexColorRegex, "color must be a valid hex color."),
-      })
-    )
+    .input(createAccountInputSchema)
     .output(persistedAccountSchema)
     .mutation(async ({ input }) => {
-      const expectedProvider = expectedProviderForKind(input.kind);
-      if (input.provider !== expectedProvider) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: `provider must be ${expectedProvider} for kind ${input.kind}.`,
-        });
-      }
-
       try {
         const account = await createAccount({
           id: input.id,

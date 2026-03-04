@@ -4,15 +4,15 @@ import {
   importTransactionsForAccount,
   type AccountRecord,
 } from "@/lib/finance/persistence";
-import type { NormalizedTransaction, StatementProvider } from "@/lib/parsers/types";
-import { isRecord, jsonError, readJsonBody } from "@/lib/server/http";
+import {
+  accountIdSchema,
+  importTransactionsPayloadSchema,
+} from "@/lib/finance/request-schemas";
+import { jsonError, readJsonBody } from "@/lib/server/http";
+import { z } from "zod";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const VALID_PROVIDERS = new Set<StatementProvider>(["aib", "revolut"]);
-const VALID_DIRECTIONS = new Set(["in", "out"]);
-const BOOKING_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 
 type RouteContext = {
   params: Promise<{ accountId: string }> | { accountId: string };
@@ -28,238 +28,16 @@ type ValidationResult<T> =
       message: string;
     };
 
-type ImportPayload = {
-  transactions: NormalizedTransaction[];
-  forceImportIndexes?: number[];
-};
+type ImportPayload = z.infer<typeof importTransactionsPayloadSchema>;
 
-function parseRequiredString(value: unknown, fieldName: string, maxLength = 300): ValidationResult<string> {
-  if (typeof value !== "string") {
-    return { ok: false, message: `${fieldName} must be a string.` };
-  }
-
-  const normalized = value.trim();
-  if (!normalized) {
-    return { ok: false, message: `${fieldName} is required.` };
-  }
-
-  if (normalized.length > maxLength) {
-    return { ok: false, message: `${fieldName} cannot exceed ${maxLength} characters.` };
-  }
-
-  return { ok: true, value: normalized };
-}
-
-function parseOptionalString(value: unknown, fieldName: string, maxLength = 300): ValidationResult<string | undefined> {
-  if (typeof value === "undefined" || value === null) {
-    return { ok: true, value: undefined };
-  }
-
-  if (typeof value !== "string") {
-    return { ok: false, message: `${fieldName} must be a string when provided.` };
-  }
-
-  const normalized = value.trim();
-  if (!normalized) {
-    return { ok: true, value: undefined };
-  }
-
-  if (normalized.length > maxLength) {
-    return { ok: false, message: `${fieldName} cannot exceed ${maxLength} characters.` };
-  }
-
-  return { ok: true, value: normalized };
-}
-
-function parseRawFields(value: unknown, fieldName: string): ValidationResult<Record<string, string>> {
-  if (!isRecord(value)) {
-    return { ok: false, message: `${fieldName} must be an object map of string values.` };
-  }
-
-  const output: Record<string, string> = {};
-  for (const [key, entryValue] of Object.entries(value)) {
-    if (typeof entryValue !== "string") {
-      return { ok: false, message: `${fieldName}.${key} must be a string.` };
-    }
-
-    output[key] = entryValue;
-  }
-
-  return { ok: true, value: output };
-}
-
-function parseTransaction(value: unknown, index: number): ValidationResult<NormalizedTransaction> {
-  if (!isRecord(value)) {
-    return { ok: false, message: `transactions[${index}] must be an object.` };
-  }
-
-  const id = parseRequiredString(value.id, `transactions[${index}].id`, 160);
-  if (!id.ok) {
-    return id;
-  }
-
-  const provider = parseRequiredString(value.provider, `transactions[${index}].provider`, 24);
-  if (!provider.ok) {
-    return provider;
-  }
-  if (!VALID_PROVIDERS.has(provider.value as StatementProvider)) {
-    return { ok: false, message: `transactions[${index}].provider must be one of: aib, revolut.` };
-  }
-
-  const bookingDate = parseRequiredString(value.bookingDate, `transactions[${index}].bookingDate`, 24);
-  if (!bookingDate.ok) {
-    return bookingDate;
-  }
-  if (!BOOKING_DATE_REGEX.test(bookingDate.value)) {
-    return { ok: false, message: `transactions[${index}].bookingDate must use YYYY-MM-DD format.` };
-  }
-
-  if (
-    typeof value.amountCents !== "number" ||
-    !Number.isInteger(value.amountCents) ||
-    value.amountCents <= 0
-  ) {
-    return { ok: false, message: `transactions[${index}].amountCents must be a positive integer.` };
-  }
-
-  const currency = parseRequiredString(value.currency, `transactions[${index}].currency`, 16);
-  if (!currency.ok) {
-    return currency;
-  }
-
-  const direction = parseRequiredString(value.direction, `transactions[${index}].direction`, 8);
-  if (!direction.ok) {
-    return direction;
-  }
-  if (!VALID_DIRECTIONS.has(direction.value)) {
-    return { ok: false, message: `transactions[${index}].direction must be one of: in, out.` };
-  }
-
-  const description = parseRequiredString(value.description, `transactions[${index}].description`, 500);
-  if (!description.ok) {
-    return description;
-  }
-
-  const categoryHint = parseOptionalString(value.categoryHint, `transactions[${index}].categoryHint`, 120);
-  if (!categoryHint.ok) {
-    return categoryHint;
-  }
-
-  const counterparty = parseOptionalString(value.counterparty, `transactions[${index}].counterparty`, 300);
-  if (!counterparty.ok) {
-    return counterparty;
-  }
-
-  const reference = parseOptionalString(value.reference, `transactions[${index}].reference`, 300);
-  if (!reference.ok) {
-    return reference;
-  }
-
-  const raw = parseRawFields(value.raw, `transactions[${index}].raw`);
-  if (!raw.ok) {
-    return raw;
-  }
-
-  return {
-    ok: true,
-    value: {
-      id: id.value,
-      provider: provider.value as StatementProvider,
-      bookingDate: bookingDate.value,
-      amountCents: value.amountCents,
-      currency: currency.value,
-      direction: direction.value as NormalizedTransaction["direction"],
-      description: description.value,
-      categoryHint: categoryHint.value,
-      counterparty: counterparty.value,
-      reference: reference.value,
-      raw: raw.value,
-    },
-  };
-}
-
-function parseForceImportIndexes(
-  value: unknown,
-  transactionCount: number
-): ValidationResult<number[] | undefined> {
-  if (typeof value === "undefined" || value === null) {
-    return { ok: true, value: undefined };
-  }
-
-  if (!Array.isArray(value)) {
-    return { ok: false, message: "forceImportIndexes must be an array when provided." };
-  }
-
-  const normalizedIndexes: number[] = [];
-  const seenIndexes = new Set<number>();
-
-  for (let index = 0; index < value.length; index += 1) {
-    const entry = value[index];
-    if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 0) {
-      return {
-        ok: false,
-        message: `forceImportIndexes[${index}] must be a non-negative integer.`,
-      };
-    }
-
-    if (entry >= transactionCount) {
-      return {
-        ok: false,
-        message: `forceImportIndexes[${index}] must be less than transactions.length (${transactionCount}).`,
-      };
-    }
-
-    if (seenIndexes.has(entry)) {
-      return {
-        ok: false,
-        message: `forceImportIndexes[${index}] must be unique.`,
-      };
-    }
-
-    seenIndexes.add(entry);
-    normalizedIndexes.push(entry);
-  }
-
-  return { ok: true, value: normalizedIndexes };
-}
-
-function validateImportPayload(payload: unknown): ValidationResult<ImportPayload> {
-  if (!isRecord(payload)) {
-    return { ok: false, message: "Body must be a JSON object." };
-  }
-
-  if (!Array.isArray(payload.transactions)) {
-    return { ok: false, message: "transactions must be an array." };
-  }
-
-  const transactions: NormalizedTransaction[] = [];
-  for (let index = 0; index < payload.transactions.length; index += 1) {
-    const parsed = parseTransaction(payload.transactions[index], index);
-    if (!parsed.ok) {
-      return parsed;
-    }
-
-    transactions.push(parsed.value);
-  }
-
-  const forceImportIndexes = parseForceImportIndexes(payload.forceImportIndexes, transactions.length);
-  if (!forceImportIndexes.ok) {
-    return forceImportIndexes;
-  }
-
-  return {
-    ok: true,
-    value: {
-      transactions,
-      forceImportIndexes: forceImportIndexes.value,
-    },
-  };
+function firstIssueMessage(error: z.ZodError, fallbackMessage: string): string {
+  return error.issues[0]?.message ?? fallbackMessage;
 }
 
 function validateProviderConsistency(
   account: AccountRecord,
-  transactions: NormalizedTransaction[]
-): ValidationResult<NormalizedTransaction[]> {
+  transactions: ImportPayload["transactions"]
+): ValidationResult<ImportPayload["transactions"]> {
   for (let index = 0; index < transactions.length; index += 1) {
     const transaction = transactions[index];
     if (transaction.provider !== account.provider) {
@@ -277,9 +55,10 @@ function validateProviderConsistency(
 
 export async function POST(request: Request, context: RouteContext): Promise<NextResponse> {
   const { accountId } = await context.params;
-  const normalizedAccountId = Number.parseInt(accountId?.trim() ?? "", 10);
+  const parsedAccountId = Number.parseInt(accountId?.trim() ?? "", 10);
+  const normalizedAccountId = accountIdSchema.safeParse(parsedAccountId);
 
-  if (!Number.isInteger(normalizedAccountId) || normalizedAccountId <= 0) {
+  if (!normalizedAccountId.success) {
     return jsonError(400, "invalid_account_id", "accountId path parameter must be a positive integer.");
   }
 
@@ -288,31 +67,35 @@ export async function POST(request: Request, context: RouteContext): Promise<Nex
     return jsonError(400, "invalid_json", parsedJson.message);
   }
 
-  const validatedPayload = validateImportPayload(parsedJson.value);
-  if (!validatedPayload.ok) {
-    return jsonError(400, "invalid_request", validatedPayload.message);
+  const validatedPayload = importTransactionsPayloadSchema.safeParse(parsedJson.value);
+  if (!validatedPayload.success) {
+    return jsonError(
+      400,
+      "invalid_request",
+      firstIssueMessage(validatedPayload.error, "Body must be a JSON object.")
+    );
   }
 
   try {
-    const account = await getAccountById(normalizedAccountId);
+    const account = await getAccountById(normalizedAccountId.data);
     if (!account) {
       return jsonError(404, "account_not_found", "Account was not found.");
     }
 
-    const validatedProviders = validateProviderConsistency(account, validatedPayload.value.transactions);
+    const validatedProviders = validateProviderConsistency(account, validatedPayload.data.transactions);
     if (!validatedProviders.ok) {
       return jsonError(400, "provider_mismatch", validatedProviders.message);
     }
 
     const result = await importTransactionsForAccount(
-      normalizedAccountId,
+      normalizedAccountId.data,
       validatedProviders.value,
       {
-        forceImportIndexes: validatedPayload.value.forceImportIndexes,
+        forceImportIndexes: validatedPayload.data.forceImportIndexes,
       }
     );
     return NextResponse.json({
-      accountId: normalizedAccountId,
+      accountId: normalizedAccountId.data,
       ...result,
     });
   } catch {
