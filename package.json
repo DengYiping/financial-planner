@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "pnpm run test:parsers && pnpm run test:import",
     "test:parsers": "node --import tsx --test src/lib/parsers/*.test.ts",
     "test:import": "node --import tsx --test src/lib/finance/import-dedupe.test.ts src/lib/finance/persistence.import.test.ts src/lib/finance/persistence.trend.test.ts src/server/api/routers/accounts.import.test.ts",
     "db:generate": "drizzle-kit generate",
