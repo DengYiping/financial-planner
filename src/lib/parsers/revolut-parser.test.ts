@@ -21,6 +21,11 @@ Transfer,Current,2025-09-14 14:29:46,2025-09-14 14:29:48,Transfer to Yangjia Pen
 Card Payment,Current,2025-09-18 08:57:41,2025-09-19 11:10:28,Transport for Ireland - TFI,-20.00,0.00,EUR,COMPLETED,762.79
 Exchange,Current,2025-09-26 19:33:34,2025-09-26 19:33:34,Exchanged to EUR,9931.19,0.00,EUR,COMPLETED,10595.57`;
 
+const REVOLUT_QUOTED_CSV = `\uFEFFType,Started Date,Completed Date,Description,Amount,Fee,Balance\r
+CARD_PAYMENT,2026-02-01 10:00:00,2026-02-01 10:05:00,"Coffee, ""Large""",-3.50,0.00,-3.50\r
+,,,,,,\r
+TRANSFER,2026-02-02 09:00:00,2026-02-02 09:01:00,"Refund, ""Promo""",5.00,0.00,1.50`;
+
 type Fixture = {
   name: string;
   fileName: string;
@@ -114,4 +119,23 @@ test("revolut parser does not infer transfer counterparties", () => {
   );
   assert.ok(toTransfer, "Expected at least one transfer-to transaction");
   assert.equal(toTransfer.counterparty, undefined);
+});
+
+test("revolut parser handles BOM, quoted CSV cells, and blank rows", () => {
+  const result = parseStatement("revolut", {
+    csvContent: REVOLUT_QUOTED_CSV,
+    fileName: "quoted.csv",
+  });
+
+  assert.equal(result.warnings.length, 0);
+  assert.equal(result.transactions.length, 2);
+
+  const [first, second] = result.transactions;
+  assert.equal(first.description, 'Coffee, "Large"');
+  assert.equal(first.amountCents, 350);
+  assert.equal(first.direction, "out");
+
+  assert.equal(second.description, 'Refund, "Promo"');
+  assert.equal(second.amountCents, 500);
+  assert.equal(second.direction, "in");
 });
