@@ -6,6 +6,11 @@ const AIB_CSV = `Posted Transactions Date,Description,Debit Amount,Credit Amount
 31/01/2026,MORTGAGE PAYMENT,1200.00,,5000.00,Debit,Current
 01/02/2026,12345678,,900.00,5900.00,Credit,Current`;
 
+const AIB_QUOTED_CSV = `\uFEFFPosted Transactions Date,Description,Debit Amount,Credit Amount,Balance,Transaction Type,Posted Account\r
+02/02/2026,"Shop, ""Special""",10.50,,5889.50,Debit,Current\r
+,,,,,,\r
+03/02/2026," 87654321 ",,15.25,5904.75,Credit,Current`;
+
 test("aib parser parses core fields and does not infer category/counterparty", () => {
   const result = parseStatement("aib", {
     csvContent: AIB_CSV,
@@ -30,4 +35,24 @@ test("aib parser parses core fields and does not infer category/counterparty", (
   assert.equal(second.categoryHint, undefined);
   assert.equal(second.counterparty, undefined);
   assert.equal(second.reference, "12345678");
+});
+
+test("aib parser handles BOM, quoted CSV cells, and blank rows", () => {
+  const result = parseStatement("aib", {
+    csvContent: AIB_QUOTED_CSV,
+    fileName: "aib_quoted.csv",
+  });
+
+  assert.equal(result.warnings.length, 0);
+  assert.equal(result.transactions.length, 2);
+
+  const [first, second] = result.transactions;
+  assert.equal(first.description, 'Shop, "Special"');
+  assert.equal(first.amountCents, 1050);
+  assert.equal(first.direction, "out");
+
+  assert.equal(second.description, "87654321");
+  assert.equal(second.amountCents, 1525);
+  assert.equal(second.direction, "in");
+  assert.equal(second.reference, "87654321");
 });
