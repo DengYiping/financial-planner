@@ -37,6 +37,7 @@ type OverviewContentProps = {
       transactionCount: number;
     }>;
   };
+  mode?: "overview" | "data_intake";
 };
 
 type UploadContext = {
@@ -69,10 +70,19 @@ type UnknownRecord = Record<string, unknown>;
 type SpendingPieSlice = {
   categoryName: string;
   spentCents: number;
+  sharePercent: number;
   color: string;
   startPercent: number;
   endPercent: number;
   href: string;
+};
+
+type SpendingComparisonRow = {
+  categoryName: string;
+  baseSpentCents: number;
+  compareSpentCents: number;
+  deltaCents: number;
+  deltaPercent: number | null;
 };
 
 const SPENDING_PIE_COLORS = [
@@ -265,17 +275,11 @@ function buildSpendingTransactionsHref(month: string, categoryName: string): str
   return `/transactions?${params.toString()}`;
 }
 
-function buildSpendingConicGradient(slices: SpendingPieSlice[]): string {
-  if (slices.length === 0) {
-    return "conic-gradient(#d9dde1 0% 100%)";
-  }
-
-  return `conic-gradient(${slices
-    .map((slice) => `${slice.color} ${slice.startPercent.toFixed(2)}% ${slice.endPercent.toFixed(2)}%`)
-    .join(", ")})`;
+function toMonthKey(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
 }
 
-export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: OverviewContentProps) {
+export function OverviewContent({ initialAccounts, initialBudgetPlannerView, mode = "overview" }: OverviewContentProps) {
   const [draftKind, setDraftKind] = useState<AccountKind>("aib_current");
   const [draftRevolutCurrency, setDraftRevolutCurrency] = useState<AccountCurrency>("EUR");
 
@@ -297,6 +301,61 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
   const [dataError, setDataError] = useState<string | null>(null);
   const [pendingImportReview, setPendingImportReview] = useState<PendingImportReviewState | null>(null);
   const [pendingImportReviewError, setPendingImportReviewError] = useState<string | null>(null);
+  const [hoveredSpendingSliceCategoryName, setHoveredSpendingSliceCategoryName] = useState<string | null>(null);
+  const [comparisonBaseMonth, setComparisonBaseMonth] = useState<string>("");
+  const [comparisonTargetMonth, setComparisonTargetMonth] = useState<string>("");
+
+  const comparisonOptionsViewQuery = trpc.accounts.spendingStatsView.useQuery({});
+  const comparisonBaseViewQuery = trpc.accounts.spendingStatsView.useQuery(
+    comparisonBaseMonth ? { month: comparisonBaseMonth } : {},
+    {
+      enabled: comparisonBaseMonth.length > 0,
+    }
+  );
+  const comparisonTargetViewQuery = trpc.accounts.spendingStatsView.useQuery(
+    comparisonTargetMonth ? { month: comparisonTargetMonth } : {},
+    {
+      enabled: comparisonTargetMonth.length > 0,
+    }
+  );
+
+  const comparisonMonthOptions = useMemo(
+    () => comparisonOptionsViewQuery.data?.monthOptions ?? [],
+    [comparisonOptionsViewQuery.data?.monthOptions]
+  );
+
+  useEffect(() => {
+    if (comparisonMonthOptions.length === 0) {
+      setComparisonBaseMonth("");
+      setComparisonTargetMonth("");
+      return;
+    }
+
+    const now = new Date();
+    const currentMonthKey = toMonthKey(now);
+    const previousMonthKey = toMonthKey(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+    const previousTwoMonthKey = toMonthKey(new Date(now.getFullYear(), now.getMonth() - 2, 1));
+    const completedMonthOptions = comparisonMonthOptions.filter((month) => month < currentMonthKey);
+
+    const defaultBaseMonth =
+      (completedMonthOptions.includes(previousMonthKey) ? previousMonthKey : completedMonthOptions[0]) ??
+      comparisonMonthOptions[0] ??
+      "";
+    const defaultTargetMonth =
+      (completedMonthOptions.includes(previousTwoMonthKey)
+        ? previousTwoMonthKey
+        : completedMonthOptions.find((month) => month !== defaultBaseMonth)) ??
+      comparisonMonthOptions.find((month) => month !== defaultBaseMonth) ??
+      defaultBaseMonth;
+
+    setComparisonBaseMonth((currentMonth) =>
+      currentMonth && comparisonMonthOptions.includes(currentMonth) ? currentMonth : defaultBaseMonth
+    );
+    setComparisonTargetMonth((currentMonth) =>
+      currentMonth && comparisonMonthOptions.includes(currentMonth) ? currentMonth : defaultTargetMonth
+    );
+  }, [comparisonMonthOptions]);
+
   const budgetPlannerRows = budgetPlannerViewQuery.data?.rows ?? initialBudgetPlannerView.rows;
   const budgetPlannerMonth = budgetPlannerViewQuery.data?.month ?? initialBudgetPlannerView.month;
   const visibleBudgetPlannerRows = useMemo(
@@ -319,6 +378,7 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
       return {
         categoryName: row.categoryName,
         spentCents: row.spentCents,
+        sharePercent: share * 100,
         color: SPENDING_PIE_COLORS[index % SPENDING_PIE_COLORS.length] ?? "#9ba8b5",
         startPercent,
         endPercent,
@@ -326,6 +386,11 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
       };
     });
   }, [visibleBudgetPlannerRows, budgetPlannerMonth]);
+  const hoveredSpendingPieSlice = useMemo(
+    () => spendingPieSlices.find((slice) => slice.categoryName === hoveredSpendingSliceCategoryName) ?? null,
+    [hoveredSpendingSliceCategoryName, spendingPieSlices]
+  );
+  const spendingPieCircumference = 2 * Math.PI * 40;
   const totalSpentEurCents = useMemo(
     () => visibleBudgetPlannerRows.reduce((sum, row) => sum + row.spentCents, 0),
     [visibleBudgetPlannerRows]
@@ -341,6 +406,107 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
     });
     return byCategory;
   }, [visibleBudgetPlannerRows, totalSpentEurCents]);
+
+  const comparisonBaseRows = useMemo(
+    () =>
+      (comparisonBaseViewQuery.data?.rows ?? []).filter(
+        (row) => row.categoryName.trim().toLocaleLowerCase("en-US") !== "excluded"
+      ),
+    [comparisonBaseViewQuery.data?.rows]
+  );
+  const comparisonTargetRows = useMemo(
+    () =>
+      (comparisonTargetViewQuery.data?.rows ?? []).filter(
+        (row) => row.categoryName.trim().toLocaleLowerCase("en-US") !== "excluded"
+      ),
+    [comparisonTargetViewQuery.data?.rows]
+  );
+  const comparisonBaseTotalCents = useMemo(
+    () => comparisonBaseRows.reduce((sum, row) => sum + row.spentCents, 0),
+    [comparisonBaseRows]
+  );
+  const comparisonTargetTotalCents = useMemo(
+    () => comparisonTargetRows.reduce((sum, row) => sum + row.spentCents, 0),
+    [comparisonTargetRows]
+  );
+  const comparisonTotalDeltaCents = comparisonBaseTotalCents - comparisonTargetTotalCents;
+  const spendingComparisonRows = useMemo<SpendingComparisonRow[]>(() => {
+    const baseByCategory = new Map<string, number>();
+    comparisonBaseRows.forEach((row) => {
+      baseByCategory.set(row.categoryName, row.spentCents);
+    });
+
+    const targetByCategory = new Map<string, number>();
+    comparisonTargetRows.forEach((row) => {
+      targetByCategory.set(row.categoryName, row.spentCents);
+    });
+
+    const allCategoryNames = new Set<string>([
+      ...Array.from(baseByCategory.keys()),
+      ...Array.from(targetByCategory.keys()),
+    ]);
+
+    return Array.from(allCategoryNames)
+      .map((categoryName) => {
+        const baseSpentCents = baseByCategory.get(categoryName) ?? 0;
+        const compareSpentCents = targetByCategory.get(categoryName) ?? 0;
+        const deltaCents = baseSpentCents - compareSpentCents;
+        const deltaPercent = compareSpentCents > 0 ? (deltaCents / compareSpentCents) * 100 : null;
+
+        return {
+          categoryName,
+          baseSpentCents,
+          compareSpentCents,
+          deltaCents,
+          deltaPercent,
+        };
+      })
+      .sort(
+        (left, right) =>
+          Math.abs(right.deltaCents) - Math.abs(left.deltaCents) || left.categoryName.localeCompare(right.categoryName)
+      );
+  }, [comparisonBaseRows, comparisonTargetRows]);
+  const comparisonQueryErrorMessage = mergeErrorMessages([
+    comparisonOptionsViewQuery.error
+      ? resolveErrorMessage(comparisonOptionsViewQuery.error, "Failed to load monthly comparison options.")
+      : undefined,
+    comparisonBaseViewQuery.error
+      ? resolveErrorMessage(comparisonBaseViewQuery.error, "Failed to load the base month comparison data.")
+      : undefined,
+    comparisonTargetViewQuery.error
+      ? resolveErrorMessage(comparisonTargetViewQuery.error, "Failed to load the compare month data.")
+      : undefined,
+  ]);
+  const showOverviewSections = mode === "overview";
+  const showDataIntakeSection = mode === "data_intake";
+  const incomeRowsByMonth = useMemo(() => {
+    return new Map(
+      (comparisonOptionsViewQuery.data?.incomeRows ?? []).map((row) => [row.month, row] as const)
+    );
+  }, [comparisonOptionsViewQuery.data?.incomeRows]);
+  const selectedIncomeMonth = comparisonOptionsViewQuery.data?.selectedMonth ?? "";
+  const selectedIncomeCents = comparisonOptionsViewQuery.data?.selectedIncomeCents ?? 0;
+  const selectedIncomeTransactionCount = comparisonOptionsViewQuery.data?.selectedIncomeTransactionCount ?? 0;
+  const compareIncomeMonth = comparisonOptionsViewQuery.data?.compareIncomeMonth;
+  const compareIncomeCents = comparisonOptionsViewQuery.data?.compareIncomeCents ?? 0;
+  const compareIncomeTransactionCount = comparisonOptionsViewQuery.data?.compareIncomeTransactionCount ?? 0;
+  const incomeDeltaCents = selectedIncomeCents - compareIncomeCents;
+  const incomeDeltaPercent = compareIncomeCents > 0 ? (incomeDeltaCents / compareIncomeCents) * 100 : null;
+  const monthlyIncomeTrendRows = useMemo(() => {
+    const monthOptions = comparisonOptionsViewQuery.data?.monthOptions ?? [];
+    const currentMonthKey = toMonthKey(new Date());
+    const completedMonths = monthOptions.filter((month) => month < currentMonthKey);
+    const trendMonths = (completedMonths.length > 0 ? completedMonths : monthOptions).slice(0, 6);
+
+    return trendMonths.map((month) => {
+      const row = incomeRowsByMonth.get(month);
+      return {
+        month,
+        incomeCents: row?.incomeCents ?? 0,
+        transactionCount: row?.transactionCount ?? 0,
+      };
+    });
+  }, [comparisonOptionsViewQuery.data?.monthOptions, incomeRowsByMonth]);
 
   const isHydratingData = accountsQuery.isPending && accounts.length === 0;
   const isCreatingAccount = createAccountMutation.isPending;
@@ -364,7 +530,16 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
     const [accountsRefresh] = await Promise.all([
       accountsQuery.refetch(),
       budgetPlannerViewQuery.refetch(),
+      comparisonOptionsViewQuery.refetch(),
     ]);
+
+    if (comparisonBaseMonth.length > 0) {
+      await comparisonBaseViewQuery.refetch();
+    }
+    if (comparisonTargetMonth.length > 0) {
+      await comparisonTargetViewQuery.refetch();
+    }
+
     return accountsRefresh;
   }
 
@@ -796,11 +971,191 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
   return (
     <>
       <div className="animate-[tab-content-enter_280ms_cubic-bezier(0.22,1,0.36,1)] will-change-[opacity,transform]">
-        <div className="grid gap-6 lg:grid-cols-[1.2fr_1fr]">
-          <SectionShell
+        <div
+          className={
+            showOverviewSections ? "grid gap-6 xl:grid-cols-[1.05fr_0.95fr] xl:items-start" : "space-y-6"
+          }
+        >
+          {showOverviewSections ? (
+            <SectionShell
+            title="Month-over-Month Comparison"
+            subtitle="Complete-month spending shifts by category, with direct links into transactions."
+            className="relative overflow-hidden before:pointer-events-none before:absolute before:-right-16 before:-top-16 before:h-48 before:w-48 before:rounded-full before:bg-accent/10"
+            >
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
+                  Base
+                  <select
+                    value={comparisonBaseMonth}
+                    onChange={(event) => {
+                      setComparisonBaseMonth(event.target.value);
+                    }}
+                    disabled={comparisonMonthOptions.length === 0}
+                    className="rounded-full border border-ink-soft/20 bg-surface px-3 py-1 text-xs text-foreground outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {comparisonMonthOptions.length === 0 ? (
+                      <option value="">No months</option>
+                    ) : (
+                      comparisonMonthOptions.map((month) => (
+                        <option key={`comparison-base-${month}`} value={month}>
+                          {formatMonthLabel(month)}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+                <label className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
+                  Compare
+                  <select
+                    value={comparisonTargetMonth}
+                    onChange={(event) => {
+                      setComparisonTargetMonth(event.target.value);
+                    }}
+                    disabled={comparisonMonthOptions.length === 0}
+                    className="rounded-full border border-ink-soft/20 bg-surface px-3 py-1 text-xs text-foreground outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {comparisonMonthOptions.length === 0 ? (
+                      <option value="">No months</option>
+                    ) : (
+                      comparisonMonthOptions.map((month) => (
+                        <option key={`comparison-target-${month}`} value={month}>
+                          {formatMonthLabel(month)}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+              </div>
+            </div>
+
+            {comparisonQueryErrorMessage ? (
+              <p className="mt-3 rounded-xl border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
+                {comparisonQueryErrorMessage}
+              </p>
+            ) : comparisonMonthOptions.length === 0 ? (
+              <p className="mt-3 rounded-xl border border-ink-soft/15 bg-surface p-3 text-xs text-muted">
+                No monthly statistics available yet.
+              </p>
+            ) : comparisonBaseMonth.length === 0 || comparisonTargetMonth.length === 0 ? (
+              <p className="mt-3 rounded-xl border border-ink-soft/15 bg-surface p-3 text-xs text-muted">
+                Select two months to compare category spending.
+              </p>
+            ) : comparisonOptionsViewQuery.isPending ||
+              comparisonBaseViewQuery.isPending ||
+              comparisonTargetViewQuery.isPending ? (
+              <p className="mt-3 rounded-xl border border-ink-soft/15 bg-surface p-3 text-xs text-muted">
+                Loading month comparison...
+              </p>
+            ) : spendingComparisonRows.length === 0 ? (
+              <p className="mt-3 rounded-xl border border-ink-soft/15 bg-surface p-3 text-xs text-muted">
+                No outflow category data found for the selected month pair.
+              </p>
+            ) : (
+              <div className="mt-3 space-y-3">
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <div className="rounded-xl border border-ink-soft/15 bg-surface/80 p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
+                      {formatMonthLabel(comparisonBaseMonth)}
+                    </p>
+                    <p className="mt-1 font-mono text-sm text-foreground">
+                      {formatCurrencyCents(comparisonBaseTotalCents, "EUR", "en-IE")}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-ink-soft/15 bg-surface/80 p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
+                      {formatMonthLabel(comparisonTargetMonth)}
+                    </p>
+                    <p className="mt-1 font-mono text-sm text-foreground">
+                      {formatCurrencyCents(comparisonTargetTotalCents, "EUR", "en-IE")}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-ink-soft/15 bg-surface/80 p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
+                      Change (Base - Compare)
+                    </p>
+                    <p
+                      className={`mt-1 font-mono text-sm ${
+                        comparisonTotalDeltaCents > 0
+                          ? "text-danger"
+                          : comparisonTotalDeltaCents < 0
+                            ? "text-positive"
+                            : "text-muted"
+                      }`}
+                    >
+                      {comparisonTotalDeltaCents >= 0 ? "+" : "-"}
+                      {formatCurrencyCents(Math.abs(comparisonTotalDeltaCents), "EUR", "en-IE")}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[520px] border-separate border-spacing-y-2">
+                    <thead className="text-left text-[11px] uppercase tracking-[0.1em] text-muted">
+                      <tr>
+                        <th className="px-3 py-1.5">Category</th>
+                        <th className="px-3 py-1.5 text-right">{formatMonthLabel(comparisonBaseMonth)}</th>
+                        <th className="px-3 py-1.5 text-right">{formatMonthLabel(comparisonTargetMonth)}</th>
+                        <th className="px-3 py-1.5 text-right">Delta</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {spendingComparisonRows.map((row) => {
+                        const baseMonthHref = buildSpendingTransactionsHref(comparisonBaseMonth, row.categoryName);
+                        const targetMonthHref = buildSpendingTransactionsHref(comparisonTargetMonth, row.categoryName);
+                        return (
+                          <tr key={`comparison-${row.categoryName}`} className="rounded-xl bg-surface/80">
+                            <td className="rounded-l-xl border border-r-0 border-ink-soft/15 px-3 py-2 text-xs text-foreground">
+                              <Link
+                                href={baseMonthHref}
+                                className="underline decoration-ink-soft/30 underline-offset-4 transition hover:decoration-accent"
+                              >
+                                {row.categoryName}
+                              </Link>
+                            </td>
+                            <td className="border-y border-ink-soft/15 px-3 py-2 text-right font-mono text-xs text-foreground">
+                              <Link
+                                href={baseMonthHref}
+                                className="underline decoration-ink-soft/30 underline-offset-4 transition hover:decoration-accent"
+                              >
+                                {formatCurrencyCents(row.baseSpentCents, "EUR", "en-IE")}
+                              </Link>
+                            </td>
+                            <td className="border-y border-ink-soft/15 px-3 py-2 text-right font-mono text-xs text-foreground">
+                              <Link
+                                href={targetMonthHref}
+                                className="underline decoration-ink-soft/30 underline-offset-4 transition hover:decoration-accent"
+                              >
+                                {formatCurrencyCents(row.compareSpentCents, "EUR", "en-IE")}
+                              </Link>
+                            </td>
+                            <td
+                              className={`rounded-r-xl border border-l-0 border-ink-soft/15 px-3 py-2 text-right font-mono text-xs ${
+                                row.deltaCents > 0 ? "text-danger" : row.deltaCents < 0 ? "text-positive" : "text-muted"
+                              }`}
+                            >
+                              {row.deltaCents >= 0 ? "+" : "-"}
+                              {formatCurrencyCents(Math.abs(row.deltaCents), "EUR", "en-IE")}
+                              <span className="ml-1 text-[10px] text-muted">
+                                {row.deltaPercent === null ? "(new)" : `(${row.deltaPercent.toFixed(1)}%)`}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+            </SectionShell>
+          ) : null}
+
+          {showDataIntakeSection ? (
+            <SectionShell
             title="Data Intake"
             subtitle="Add accounts by type and upload statement files directly into each account."
-          >
+            >
             <div className="mb-5 flex flex-wrap items-end gap-3 rounded-2xl border border-ink-soft/15 bg-surface p-4">
               <label className="flex flex-col gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
                 Account Type
@@ -1000,13 +1355,16 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                 ))}
               </div>
             )}
-          </SectionShell>
+            </SectionShell>
+          ) : null}
 
-          <SectionShell
+          {showOverviewSections ? (
+            <SectionShell
             title="Last Month Spending Stats"
             subtitle={`Category statistics from ${formatMonthLabel(
               budgetPlannerMonth
             )} (excluding current month).`}
+            className="relative overflow-hidden before:pointer-events-none before:absolute before:-left-16 before:-bottom-20 before:h-56 before:w-56 before:rounded-full before:bg-ink-soft/10"
             action={
               <Link
                 href="/statistics"
@@ -1016,7 +1374,7 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
               </Link>
             }
           >
-            <p className="mb-3 inline-flex items-center rounded-full border border-ink-soft/20 bg-surface px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em] text-muted">
+            <p className="mb-2 inline-flex items-center rounded-full border border-ink-soft/20 bg-surface px-3 py-1 text-xs font-semibold uppercase tracking-[0.1em] text-muted">
               Calculated Month: {formatMonthLabel(budgetPlannerMonth)}
             </p>
             {visibleBudgetPlannerRows.length === 0 ? (
@@ -1024,19 +1382,64 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                 No spending transactions found for {formatMonthLabel(budgetPlannerMonth)}.
               </p>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-2">
                 {spendingPieSlices.length > 0 ? (
-                  <article className="rounded-2xl border border-ink-soft/15 bg-surface p-4">
+                  <article className="rounded-2xl border border-ink-soft/15 bg-surface p-3">
                     <p className="text-xs font-semibold uppercase tracking-[0.1em] text-muted">
                       Spending Breakdown
                     </p>
-                    <div className="mt-3 flex flex-wrap items-center gap-4">
-                      <div
-                        className="relative h-32 w-32 shrink-0 rounded-full border border-ink-soft/20"
-                        style={{ background: buildSpendingConicGradient(spendingPieSlices) }}
-                        aria-label="Spending distribution pie chart in EUR"
-                      >
-                        <div className="absolute inset-5 flex items-center justify-center rounded-full border border-ink-soft/15 bg-surface">
+                    <div className="mt-2 flex flex-wrap items-center gap-3">
+                      <div className="relative h-28 w-28 shrink-0 rounded-full border border-ink-soft/20">
+                        <svg
+                          viewBox="0 0 100 100"
+                          className="h-full w-full -rotate-90"
+                          aria-label="Spending distribution pie chart in EUR"
+                        >
+                          <circle cx="50" cy="50" r="40" fill="none" stroke="#d9dde1" strokeWidth="20" />
+                          {spendingPieSlices.map((slice) => {
+                            const dashLength = (slice.sharePercent / 100) * spendingPieCircumference;
+                            const dashGap = Math.max(spendingPieCircumference - dashLength, 0);
+                            const isHighlighted =
+                              hoveredSpendingSliceCategoryName === null ||
+                              hoveredSpendingSliceCategoryName === slice.categoryName;
+
+                            return (
+                              <circle
+                                key={`overview-pie-slice-${slice.categoryName}`}
+                                cx="50"
+                                cy="50"
+                                r="40"
+                                fill="none"
+                                stroke={slice.color}
+                                strokeWidth="20"
+                                strokeDasharray={`${dashLength} ${dashGap}`}
+                                strokeDashoffset={-((slice.startPercent / 100) * spendingPieCircumference)}
+                                pointerEvents="stroke"
+                                className={`cursor-pointer transition-opacity ${isHighlighted ? "opacity-100" : "opacity-45"}`}
+                                onPointerEnter={() => {
+                                  setHoveredSpendingSliceCategoryName(slice.categoryName);
+                                }}
+                                onPointerLeave={() => {
+                                  setHoveredSpendingSliceCategoryName(null);
+                                }}
+                                onFocus={() => {
+                                  setHoveredSpendingSliceCategoryName(slice.categoryName);
+                                }}
+                                onBlur={() => {
+                                  setHoveredSpendingSliceCategoryName(null);
+                                }}
+                                role="img"
+                                tabIndex={0}
+                                aria-label={`${slice.categoryName}: ${slice.sharePercent.toFixed(1)}% (${formatCurrencyCents(
+                                  slice.spentCents,
+                                  "EUR",
+                                  "en-IE"
+                                )})`}
+                              />
+                            );
+                          })}
+                        </svg>
+                        <div className="pointer-events-none absolute inset-4 flex items-center justify-center rounded-full border border-ink-soft/15 bg-surface">
                           <div className="text-center">
                             <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">Total</p>
                             <p className="font-mono text-xs text-foreground">
@@ -1045,7 +1448,16 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                           </div>
                         </div>
                       </div>
-                      <ul className="min-w-0 flex-1 space-y-1">
+                      {hoveredSpendingPieSlice ? (
+                        <div className="rounded-xl border border-ink-soft/15 bg-surface/80 px-3 py-2 text-xs">
+                          <p className="font-semibold text-foreground">{hoveredSpendingPieSlice.categoryName}</p>
+                          <p className="mt-1 font-mono text-muted">
+                            {hoveredSpendingPieSlice.sharePercent.toFixed(1)}% ·{" "}
+                            {formatCurrencyCents(hoveredSpendingPieSlice.spentCents, "EUR", "en-IE")}
+                          </p>
+                        </div>
+                      ) : null}
+                      <ul className="min-w-0 flex-1 space-y-0.5">
                         {spendingPieSlices.slice(0, 8).map((slice) => (
                           <li key={`spending-pie-${slice.categoryName}`} className="flex items-center gap-2">
                             <span
@@ -1072,7 +1484,8 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                     </div>
                   </article>
                 ) : null}
-                {visibleBudgetPlannerRows.map((row) => {
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {visibleBudgetPlannerRows.map((row) => {
                   const totalLabel = formatCurrencyCents(row.spentCents, "EUR", "en-IE");
                   const averageCents =
                     row.transactionCount > 0 ? Math.round(row.spentCents / row.transactionCount) : 0;
@@ -1081,10 +1494,10 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                   const sharePercent = Math.max(0, Math.min(share * 100, 100));
                   const transactionHref = buildSpendingTransactionsHref(budgetPlannerMonth, row.categoryName);
                   return (
-                    <article key={row.categoryName} className="rounded-2xl border border-ink-soft/15 bg-surface p-4">
+                    <article key={row.categoryName} className="rounded-xl border border-ink-soft/15 bg-surface p-3">
                       <div className="flex items-start justify-between gap-3">
                         <div>
-                          <h3 className="text-sm font-semibold text-foreground">
+                          <h3 className="text-xs font-semibold text-foreground">
                             <Link
                               href={transactionHref}
                               className="underline decoration-ink-soft/30 underline-offset-4 transition hover:decoration-accent"
@@ -1093,9 +1506,9 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                             </Link>
                           </h3>
                         </div>
-                        <p className="font-mono text-sm text-foreground">{totalLabel}</p>
+                        <p className="font-mono text-xs text-foreground">{totalLabel}</p>
                       </div>
-                      <div className="mt-3 grid gap-2 text-xs text-muted sm:grid-cols-2">
+                      <div className="mt-2 grid gap-1 text-xs text-muted">
                         <p>
                           Transactions: <span className="font-semibold text-foreground">{row.transactionCount}</span>
                         </p>
@@ -1103,7 +1516,7 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                           Avg / transaction: <span className="font-semibold text-foreground">{averageLabel}</span>
                         </p>
                       </div>
-                      <div className="mt-3">
+                      <div className="mt-2">
                         <div className="h-2 w-full overflow-hidden rounded-full bg-ink-soft/15">
                           <div
                             className="h-full rounded-full bg-accent/70"
@@ -1116,10 +1529,118 @@ export function OverviewContent({ initialAccounts, initialBudgetPlannerView }: O
                       </div>
                     </article>
                   );
-                })}
+                  })}
+                </div>
               </div>
             )}
-          </SectionShell>
+            </SectionShell>
+          ) : null}
+
+          {showOverviewSections ? (
+            <SectionShell
+              title="Monthly Income Analysis"
+              subtitle='Income-tagged inflows aggregated in backend SQL by effective month (deemed date when available).'
+              className="xl:col-span-2 relative overflow-hidden before:pointer-events-none before:absolute before:right-0 before:top-0 before:h-44 before:w-44 before:rounded-full before:bg-positive/10"
+              action={
+                <p className="font-mono text-xs uppercase tracking-[0.1em] text-muted">
+                  {selectedIncomeMonth ? `Baseline ${formatMonthLabel(selectedIncomeMonth)}` : "No baseline month"}
+                </p>
+              }
+            >
+              {comparisonOptionsViewQuery.error ? (
+                <p className="rounded-2xl border border-danger/30 bg-danger/10 p-4 text-sm text-danger">
+                  {resolveErrorMessage(comparisonOptionsViewQuery.error, "Failed to load monthly income analysis.")}
+                </p>
+              ) : comparisonOptionsViewQuery.isPending ? (
+                <p className="rounded-2xl border border-ink-soft/15 bg-surface p-4 text-sm text-muted">
+                  Loading monthly income analysis...
+                </p>
+              ) : !selectedIncomeMonth ? (
+                <p className="rounded-2xl border border-ink-soft/15 bg-surface p-4 text-sm text-muted">
+                  No month data available for monthly income analysis.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <div className="rounded-xl border border-ink-soft/15 bg-surface/80 p-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
+                        Last Month Income ({formatMonthLabel(selectedIncomeMonth)})
+                      </p>
+                      <p className="mt-1 font-mono text-sm text-positive">
+                        +{formatCurrencyCents(selectedIncomeCents, "EUR", "en-IE")}
+                      </p>
+                      <p className="mt-1 text-[11px] text-muted">
+                        {selectedIncomeTransactionCount} income transaction
+                        {selectedIncomeTransactionCount === 1 ? "" : "s"}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-ink-soft/15 bg-surface/80 p-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
+                        Compare Month{" "}
+                        {compareIncomeMonth ? `(${formatMonthLabel(compareIncomeMonth)})` : ""}
+                      </p>
+                      <p className="mt-1 font-mono text-sm text-foreground">
+                        +{formatCurrencyCents(compareIncomeCents, "EUR", "en-IE")}
+                      </p>
+                      <p className="mt-1 text-[11px] text-muted">
+                        {compareIncomeTransactionCount} income transaction
+                        {compareIncomeTransactionCount === 1 ? "" : "s"}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-ink-soft/15 bg-surface/80 p-3">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-muted">
+                        Monthly Income Comparison
+                      </p>
+                      <p
+                        className={`mt-1 font-mono text-sm ${
+                          incomeDeltaCents > 0 ? "text-positive" : incomeDeltaCents < 0 ? "text-danger" : "text-muted"
+                        }`}
+                      >
+                        {incomeDeltaCents >= 0 ? "+" : "-"}
+                        {formatCurrencyCents(Math.abs(incomeDeltaCents), "EUR", "en-IE")}
+                      </p>
+                      <p className="mt-1 text-[11px] text-muted">
+                        {incomeDeltaPercent === null ? "No prior month baseline" : `${incomeDeltaPercent.toFixed(1)}% vs compare`}
+                      </p>
+                    </div>
+                  </div>
+
+                  {monthlyIncomeTrendRows.length === 0 ? (
+                    <p className="rounded-xl border border-ink-soft/15 bg-surface p-3 text-xs text-muted">
+                      No monthly income trend data yet.
+                    </p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[560px] border-separate border-spacing-y-2">
+                        <thead className="text-left text-[11px] uppercase tracking-[0.1em] text-muted">
+                          <tr>
+                            <th className="px-3 py-1.5">Month</th>
+                            <th className="px-3 py-1.5 text-right">Income</th>
+                            <th className="px-3 py-1.5 text-right">Transactions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {monthlyIncomeTrendRows.map((row) => (
+                            <tr key={`monthly-income-row-${row.month}`} className="rounded-xl bg-surface/80">
+                              <td className="rounded-l-xl border border-r-0 border-ink-soft/15 px-3 py-2 text-xs text-foreground">
+                                {formatMonthLabel(row.month)}
+                              </td>
+                              <td className="border-y border-ink-soft/15 px-3 py-2 text-right font-mono text-xs text-positive">
+                                +{formatCurrencyCents(row.incomeCents, "EUR", "en-IE")}
+                              </td>
+                              <td className="rounded-r-xl border border-l-0 border-ink-soft/15 px-3 py-2 text-right text-xs text-muted">
+                                {row.transactionCount}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+            </SectionShell>
+          ) : null}
         </div>
       </div>
 

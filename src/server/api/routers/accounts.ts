@@ -65,6 +65,7 @@ const normalizedTransactionSchema = z.object({
   id: z.string().trim().min(1).max(160),
   provider: statementProviderSchema,
   bookingDate: z.string().trim().regex(bookingDateRegex, "bookingDate must use YYYY-MM-DD format."),
+  deemedDate: z.string().trim().regex(bookingDateRegex, "deemedDate must use YYYY-MM-DD format.").optional(),
   amountCents: z.number().int().positive(),
   currency: z.string().trim().min(1).max(16),
   direction: z.enum(["in", "out"]),
@@ -176,6 +177,20 @@ const budgetPlannerRowSchema = z.object({
   transactionCount: z.number().int().nonnegative(),
 });
 
+const tagSpendingRowSchema = z.object({
+  tagName: z.string(),
+  currency: z.string().min(1),
+  spentCents: z.number().int().nonnegative(),
+  transactionCount: z.number().int().nonnegative(),
+});
+
+const incomeMonthlyRowSchema = z.object({
+  month: monthKeySchema,
+  currency: z.string().min(1),
+  incomeCents: z.number().int().nonnegative(),
+  transactionCount: z.number().int().nonnegative(),
+});
+
 const budgetPlannerViewSchema = z.object({
   month: monthKeySchema,
   rows: z.array(budgetPlannerRowSchema),
@@ -185,6 +200,13 @@ const spendingStatsViewSchema = z.object({
   monthOptions: z.array(monthKeySchema),
   selectedMonth: monthKeySchema.optional(),
   rows: z.array(budgetPlannerRowSchema),
+  tagRows: z.array(tagSpendingRowSchema),
+  incomeRows: z.array(incomeMonthlyRowSchema),
+  selectedIncomeCents: z.number().int().nonnegative(),
+  selectedIncomeTransactionCount: z.number().int().nonnegative(),
+  compareIncomeMonth: monthKeySchema.optional(),
+  compareIncomeCents: z.number().int().nonnegative(),
+  compareIncomeTransactionCount: z.number().int().nonnegative(),
 });
 
 const transactionRuleSchema = z.object({
@@ -1099,6 +1121,7 @@ export const accountsRouter = createTRPCRouter({
         accountId: accountIdSchema,
         transactionId: z.string().trim().min(1).max(160),
         bookingDate: z.string().trim().regex(bookingDateRegex, "bookingDate must use YYYY-MM-DD format."),
+        deemedDate: z.string().trim().regex(bookingDateRegex, "deemedDate must use YYYY-MM-DD format.").nullish(),
         amountCents: z.number().int().positive(),
         currency: z.string().trim().min(1).max(16),
         direction: z.enum(["in", "out"]),
@@ -1120,6 +1143,7 @@ export const accountsRouter = createTRPCRouter({
       try {
         const updated = await updateTransactionForAccount(input.accountId, input.transactionId, {
           bookingDate: input.bookingDate,
+          deemedDate: input.deemedDate ?? undefined,
           amountCents: input.amountCents,
           currency: input.currency,
           direction: input.direction,
@@ -1159,6 +1183,7 @@ export const accountsRouter = createTRPCRouter({
       z.object({
         accountId: accountIdSchema,
         bookingDate: z.string().trim().regex(bookingDateRegex, "bookingDate must use YYYY-MM-DD format."),
+        deemedDate: z.string().trim().regex(bookingDateRegex, "deemedDate must use YYYY-MM-DD format.").nullish(),
         amountCents: z.number().int().positive(),
         currency: z.string().trim().min(1).max(16),
         direction: z.enum(["in", "out"]),
@@ -1189,6 +1214,7 @@ export const accountsRouter = createTRPCRouter({
         const result = await createTransactionForAccount(input.accountId, {
           provider: account.provider,
           bookingDate: input.bookingDate,
+          deemedDate: input.deemedDate ?? undefined,
           amountCents: input.amountCents,
           currency: input.currency,
           direction: input.direction,

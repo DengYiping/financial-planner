@@ -11,6 +11,7 @@ export type NormalizedTransaction = {
   id: string;
   provider: StatementProvider;
   bookingDate: string;
+  deemedDate?: string;
   amountCents: number;
   currency: string;
   direction: TransactionDirection;

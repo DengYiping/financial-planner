@@ -48,6 +48,7 @@ export const transactions = sqliteTable(
     sourceId: text("source_id").notNull(),
     provider: text("provider", { enum: ["aib", "revolut"] }).$type<StatementProvider>().notNull(),
     bookingDate: text("booking_date").notNull(),
+    deemedDate: text("deemed_date"),
     amountCents: integer("amount_cents").notNull(),
     currency: text("currency").notNull(),
     direction: text("direction", { enum: ["in", "out"] }).$type<TransactionDirection>().notNull(),

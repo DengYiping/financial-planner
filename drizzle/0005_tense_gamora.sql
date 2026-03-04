@@ -1,0 +1,1 @@
+ALTER TABLE `transactions` ADD `deemed_date` text;

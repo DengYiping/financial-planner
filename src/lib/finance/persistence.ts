@@ -100,6 +100,20 @@ export type DashboardBudgetPlannerRow = {
   transactionCount: number;
 };
 
+export type DashboardTagSpendingRow = {
+  tagName: string;
+  currency: string;
+  spentCents: number;
+  transactionCount: number;
+};
+
+export type DashboardIncomeMonthlyRow = {
+  month: string;
+  currency: string;
+  incomeCents: number;
+  transactionCount: number;
+};
+
 export type DashboardBudgetPlannerView = {
   month: string;
   rows: DashboardBudgetPlannerRow[];
@@ -113,6 +127,13 @@ export type DashboardSpendingStatsView = {
   monthOptions: string[];
   selectedMonth?: string;
   rows: DashboardBudgetPlannerRow[];
+  tagRows: DashboardTagSpendingRow[];
+  incomeRows: DashboardIncomeMonthlyRow[];
+  selectedIncomeCents: number;
+  selectedIncomeTransactionCount: number;
+  compareIncomeMonth?: string;
+  compareIncomeCents: number;
+  compareIncomeTransactionCount: number;
 };
 
 export type CreateAccountInput = {
@@ -151,6 +172,7 @@ export type ImportTransactionsResult = {
 export type CreateTransactionForAccountInput = {
   provider: StatementProvider;
   bookingDate: string;
+  deemedDate?: string;
   amountCents: number;
   currency: string;
   direction: "in" | "out";
@@ -167,6 +189,7 @@ export type CreateTransactionForAccountResult = {
 
 export type UpdateTransactionForAccountInput = {
   bookingDate: string;
+  deemedDate?: string;
   amountCents: number;
   currency: string;
   direction: "in" | "out";
@@ -255,6 +278,22 @@ function getPreviousMonthKey(now: Date = new Date()): string {
   const previousMonth = month === 1 ? 12 : month - 1;
   const previousYear = month === 1 ? year - 1 : year;
   return `${previousYear}-${String(previousMonth).padStart(2, "0")}`;
+}
+
+function getPreviousMonthKeyFromMonthKey(monthKey: string): string | undefined {
+  if (!MONTH_KEY_PATTERN.test(monthKey)) {
+    return undefined;
+  }
+
+  const [yearToken, monthToken] = monthKey.split("-");
+  const year = Number.parseInt(yearToken ?? "", 10);
+  const month = Number.parseInt(monthToken ?? "", 10);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) {
+    return undefined;
+  }
+
+  const date = new Date(Date.UTC(year, month - 1, 1));
+  return getPreviousMonthKey(date);
 }
 
 function toRulePersistenceValues(input: ValidatedTransactionRuleWriteInput): {
@@ -586,6 +625,7 @@ async function listTransactionsForAccounts(accountIds: number[]): Promise<Map<nu
       sourceId: transactionsTable.sourceId,
       provider: transactionsTable.provider,
       bookingDate: transactionsTable.bookingDate,
+      deemedDate: transactionsTable.deemedDate,
       amountCents: transactionsTable.amountCents,
       currency: transactionsTable.currency,
       direction: transactionsTable.direction,
@@ -610,6 +650,7 @@ async function listTransactionsForAccounts(accountIds: number[]): Promise<Map<nu
       id: row.sourceId,
       provider: row.provider,
       bookingDate: row.bookingDate,
+      deemedDate: row.deemedDate ?? undefined,
       amountCents: Math.abs(Math.trunc(toNumberValue(row.amountCents))),
       currency: row.currency,
       direction: row.direction === "out" ? ("out" as const) : ("in" as const),
@@ -638,7 +679,7 @@ async function listTransactionsForAccounts(accountIds: number[]): Promise<Map<nu
 
 async function listTransactionMonthOptions(): Promise<string[]> {
   const db = getFinanceDb();
-  const monthExpr = sql<string>`substr(${transactionsTable.bookingDate}, 1, 7)`;
+  const monthExpr = sql<string>`substr(coalesce(${transactionsTable.deemedDate}, ${transactionsTable.bookingDate}), 1, 7)`;
 
   const rows = await db
     .select({
@@ -719,8 +760,8 @@ export async function getDashboardTransactionsView(
   const monthWhereClause =
     selectedStartMonth && selectedEndMonth
       ? and(
-          sql`substr(${transactionsTable.bookingDate}, 1, 7) >= ${selectedStartMonth}`,
-          sql`substr(${transactionsTable.bookingDate}, 1, 7) <= ${selectedEndMonth}`
+          sql`substr(coalesce(${transactionsTable.deemedDate}, ${transactionsTable.bookingDate}), 1, 7) >= ${selectedStartMonth}`,
+          sql`substr(coalesce(${transactionsTable.deemedDate}, ${transactionsTable.bookingDate}), 1, 7) <= ${selectedEndMonth}`
         )
       : undefined;
 
@@ -732,6 +773,7 @@ export async function getDashboardTransactionsView(
     sourceId: transactionsTable.sourceId,
     provider: transactionsTable.provider,
     bookingDate: transactionsTable.bookingDate,
+    deemedDate: transactionsTable.deemedDate,
     amountCents: transactionsTable.amountCents,
     currency: transactionsTable.currency,
     direction: transactionsTable.direction,
@@ -759,6 +801,7 @@ export async function getDashboardTransactionsView(
       id: row.sourceId,
       provider: row.provider,
       bookingDate: row.bookingDate,
+      deemedDate: row.deemedDate ?? undefined,
       amountCents: Math.abs(Math.trunc(toNumberValue(row.amountCents))),
       currency: row.currency,
       direction: row.direction === "out" ? "out" : "in",
@@ -843,7 +886,7 @@ export async function getDashboardSummaryView(input: DashboardSummaryViewInput):
       transactionsTable,
       and(
         eq(transactionsTable.accountId, accounts.id),
-        sql`substr(${transactionsTable.bookingDate}, 1, 7) = ${selectedMonth}`
+        sql`substr(coalesce(${transactionsTable.deemedDate}, ${transactionsTable.bookingDate}), 1, 7) = ${selectedMonth}`
       )
     )
     .groupBy(accounts.id, accounts.name, accounts.kind, accounts.currency, accounts.color, accounts.createdAt)
@@ -903,7 +946,7 @@ async function listDashboardSpendingRowsForMonth(month: string): Promise<Dashboa
     .where(
       and(
         eq(transactionsTable.direction, "out"),
-        sql`substr(${transactionsTable.bookingDate}, 1, 7) = ${month}`,
+        sql`substr(coalesce(${transactionsTable.deemedDate}, ${transactionsTable.bookingDate}), 1, 7) = ${month}`,
         sql`${normalizedCategoryNameExpr} <> 'excluded'`
       )
     )
@@ -916,6 +959,85 @@ async function listDashboardSpendingRowsForMonth(month: string): Promise<Dashboa
     spentCents: Math.max(0, Math.trunc(toNumberValue(row.spentCents))),
     transactionCount: Math.max(0, Math.trunc(toNumberValue(row.transactionCount))),
   }));
+}
+
+async function listDashboardTagSpendingRowsForMonth(month: string): Promise<DashboardTagSpendingRow[]> {
+  const db = getFinanceDb();
+  const tagNameExpr = sql<string>`coalesce(${tags.name}, 'Untagged')`;
+  const normalizedCategoryNameExpr = sql<string>`lower(trim(coalesce(${categories.name}, '')))`;
+  const amountEurCentsExpr = sql<number>`case
+    when ${transactionsTable.currency} = 'EUR' then ${transactionsTable.amountCents}
+    when ${transactionsTable.currency} = 'USD' then cast(round((${transactionsTable.amountCents} * ${USD_TO_EUR_RATE_NUMERATOR}) / ${USD_TO_EUR_RATE_DENOMINATOR}) as integer)
+    else ${transactionsTable.amountCents}
+  end`;
+  const spentCentsExpr = sql<number>`coalesce(sum(${amountEurCentsExpr}), 0)`;
+  const transactionCountExpr = sql<number>`count(distinct ${transactionsTable.id})`;
+
+  const rows = await db
+    .select({
+      tagName: tagNameExpr,
+      spentCents: spentCentsExpr,
+      transactionCount: transactionCountExpr,
+    })
+    .from(transactionsTable)
+    .leftJoin(categories, eq(categories.id, transactionsTable.categoryId))
+    .leftJoin(transactionTagsTable, eq(transactionTagsTable.transactionId, transactionsTable.id))
+    .leftJoin(tags, eq(tags.id, transactionTagsTable.tagId))
+    .where(
+      and(
+        eq(transactionsTable.direction, "out"),
+        sql`substr(coalesce(${transactionsTable.deemedDate}, ${transactionsTable.bookingDate}), 1, 7) = ${month}`,
+        sql`${normalizedCategoryNameExpr} <> 'excluded'`
+      )
+    )
+    .groupBy(tagNameExpr)
+    .orderBy(desc(spentCentsExpr), desc(transactionCountExpr), asc(tagNameExpr));
+
+  return rows.map((row) => ({
+    tagName: row.tagName,
+    currency: "EUR",
+    spentCents: Math.max(0, Math.trunc(toNumberValue(row.spentCents))),
+    transactionCount: Math.max(0, Math.trunc(toNumberValue(row.transactionCount))),
+  }));
+}
+
+async function listDashboardIncomeRowsByMonth(): Promise<DashboardIncomeMonthlyRow[]> {
+  const db = getFinanceDb();
+  const monthExpr = sql<string>`substr(coalesce(${transactionsTable.deemedDate}, ${transactionsTable.bookingDate}), 1, 7)`;
+  const amountEurCentsExpr = sql<number>`case
+    when ${transactionsTable.currency} = 'EUR' then ${transactionsTable.amountCents}
+    when ${transactionsTable.currency} = 'USD' then cast(round((${transactionsTable.amountCents} * ${USD_TO_EUR_RATE_NUMERATOR}) / ${USD_TO_EUR_RATE_DENOMINATOR}) as integer)
+    else ${transactionsTable.amountCents}
+  end`;
+  const incomeCentsExpr = sql<number>`coalesce(sum(${amountEurCentsExpr}), 0)`;
+  const transactionCountExpr = sql<number>`count(distinct ${transactionsTable.id})`;
+  const hasIncomeTagExpr = sql<boolean>`exists (
+    select 1
+    from ${transactionTagsTable}
+    inner join ${tags} on ${tags.id} = ${transactionTagsTable.tagId}
+    where ${transactionTagsTable.transactionId} = ${transactionsTable.id}
+      and lower(trim(${tags.name})) = 'income'
+  )`;
+
+  const rows = await db
+    .select({
+      month: monthExpr,
+      incomeCents: incomeCentsExpr,
+      transactionCount: transactionCountExpr,
+    })
+    .from(transactionsTable)
+    .where(and(eq(transactionsTable.direction, "in"), hasIncomeTagExpr))
+    .groupBy(monthExpr)
+    .orderBy(desc(monthExpr));
+
+  return rows
+    .map((row) => ({
+      month: row.month,
+      currency: "EUR",
+      incomeCents: Math.max(0, Math.trunc(toNumberValue(row.incomeCents))),
+      transactionCount: Math.max(0, Math.trunc(toNumberValue(row.transactionCount))),
+    }))
+    .filter((row) => MONTH_KEY_PATTERN.test(row.month));
 }
 
 export async function getDashboardBudgetPlannerView(): Promise<DashboardBudgetPlannerView> {
@@ -932,22 +1054,46 @@ export async function getDashboardSpendingStatsView(
   input: DashboardSpendingStatsViewInput
 ): Promise<DashboardSpendingStatsView> {
   const monthOptions = await listTransactionMonthOptions();
+  const defaultMonth = monthOptions.includes(getPreviousMonthKey()) ? getPreviousMonthKey() : monthOptions[0];
   const selectedMonth =
-    monthOptions.length === 0 ? undefined : input.month && monthOptions.includes(input.month) ? input.month : monthOptions[0];
+    monthOptions.length === 0 ? undefined : input.month && monthOptions.includes(input.month) ? input.month : defaultMonth;
 
   if (!selectedMonth) {
     return {
       monthOptions,
       selectedMonth: undefined,
       rows: [],
+      tagRows: [],
+      incomeRows: [],
+      selectedIncomeCents: 0,
+      selectedIncomeTransactionCount: 0,
+      compareIncomeMonth: undefined,
+      compareIncomeCents: 0,
+      compareIncomeTransactionCount: 0,
     };
   }
 
-  const rows = await listDashboardSpendingRowsForMonth(selectedMonth);
+  const [rows, tagRows, incomeRows] = await Promise.all([
+    listDashboardSpendingRowsForMonth(selectedMonth),
+    listDashboardTagSpendingRowsForMonth(selectedMonth),
+    listDashboardIncomeRowsByMonth(),
+  ]);
+  const incomeByMonth = new Map(incomeRows.map((row) => [row.month, row]));
+  const selectedIncome = incomeByMonth.get(selectedMonth);
+  const compareIncomeMonth = getPreviousMonthKeyFromMonthKey(selectedMonth);
+  const compareIncome = compareIncomeMonth ? incomeByMonth.get(compareIncomeMonth) : undefined;
+
   return {
     monthOptions,
     selectedMonth,
     rows,
+    tagRows,
+    incomeRows,
+    selectedIncomeCents: selectedIncome?.incomeCents ?? 0,
+    selectedIncomeTransactionCount: selectedIncome?.transactionCount ?? 0,
+    compareIncomeMonth,
+    compareIncomeCents: compareIncome?.incomeCents ?? 0,
+    compareIncomeTransactionCount: compareIncome?.transactionCount ?? 0,
   };
 }
 
@@ -1800,6 +1946,7 @@ export async function createTransactionForAccount(
           sourceId,
           provider: input.provider,
           bookingDate: input.bookingDate,
+          deemedDate: input.deemedDate ?? null,
           amountCents,
           currency: input.currency,
           direction: input.direction,
@@ -1899,6 +2046,7 @@ export async function updateTransactionForAccount(
     .update(transactionsTable)
     .set({
       bookingDate: input.bookingDate,
+      deemedDate: input.deemedDate ?? null,
       amountCents,
       currency: input.currency,
       direction: input.direction,

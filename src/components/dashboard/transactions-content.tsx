@@ -41,6 +41,7 @@ type EditableTransactionDraft = {
   accountName: string;
   transactionId?: string;
   bookingDate: string;
+  deemedDate: string;
   amount: string;
   direction: "in" | "out";
   currency: string;
@@ -319,6 +320,7 @@ function toEditableTransactionDraft(row: TransactionRow): EditableTransactionDra
     accountName: row.accountName,
     transactionId: row.transaction.id,
     bookingDate: row.transaction.bookingDate,
+    deemedDate: row.transaction.deemedDate ?? "",
     amount: centsToAmountInput(row.transaction.amountCents),
     direction: row.transaction.direction,
     currency: row.transaction.currency,
@@ -339,6 +341,7 @@ function toCreateTransactionDraft(account: AccountChoice | undefined, fallbackCu
     accountName: account?.name ?? "",
     transactionId: undefined,
     bookingDate: yyyyMmDd,
+    deemedDate: "",
     amount: "0.00",
     direction: "out",
     currency: account?.currency ?? fallbackCurrency,
@@ -839,6 +842,7 @@ export function TransactionsContent({
 
     const draft = transactionModal.draft;
     const bookingDate = draft.bookingDate.trim();
+    const deemedDate = draft.deemedDate.trim();
     const amountCents = amountInputToCents(draft.amount);
     const currency = draft.currency.trim();
     const description = draft.description.trim();
@@ -852,6 +856,11 @@ export function TransactionsContent({
 
     if (!BOOKING_DATE_PATTERN.test(bookingDate)) {
       setEditError("Booking date must use YYYY-MM-DD format.");
+      return;
+    }
+
+    if (deemedDate.length > 0 && !BOOKING_DATE_PATTERN.test(deemedDate)) {
+      setEditError("Deemed date must use YYYY-MM-DD format.");
       return;
     }
 
@@ -884,6 +893,7 @@ export function TransactionsContent({
         } = {
           accountId: draft.accountId,
           bookingDate,
+          deemedDate: deemedDate.length > 0 ? deemedDate : null,
           amountCents,
           currency,
           direction: draft.direction,
@@ -908,6 +918,7 @@ export function TransactionsContent({
           accountId: draft.accountId,
           transactionId: draft.transactionId,
           bookingDate,
+          deemedDate: deemedDate.length > 0 ? deemedDate : null,
           amountCents,
           currency,
           direction: draft.direction,
@@ -2247,6 +2258,17 @@ export function TransactionsContent({
                           value={transactionModal.draft.bookingDate}
                           onChange={(event) => {
                             updateEditingField("bookingDate", event.target.value);
+                          }}
+                          className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                        Deemed Date (Optional)
+                        <input
+                          type="date"
+                          value={transactionModal.draft.deemedDate}
+                          onChange={(event) => {
+                            updateEditingField("deemedDate", event.target.value);
                           }}
                           className="rounded-xl border border-ink-soft/20 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-accent"
                         />

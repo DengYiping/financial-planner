@@ -2,6 +2,7 @@ import type { NormalizedTransaction, StatementProvider } from "@/lib/parsers";
 
 export type DashboardTab =
   | "overview"
+  | "data_intake"
   | "statistics"
   | "transactions"
   | "account_summary"
@@ -269,6 +270,10 @@ export function formatCurrencyCents(amountCents: number, currency: string, local
 }
 
 export function tabPath(tab: DashboardTab): string {
+  if (tab === "data_intake") {
+    return "/data-intake";
+  }
+
   if (tab === "statistics") {
     return "/statistics";
   }

@@ -9,6 +9,7 @@ type DashboardNavProps = {
 
 export function DashboardNav({ activeTab }: DashboardNavProps) {
   const overviewHref = tabPath("overview");
+  const dataIntakeHref = tabPath("data_intake");
   const statisticsHref = tabPath("statistics");
   const transactionsHref = tabPath("transactions");
   const accountSummaryHref = tabPath("account_summary");
@@ -28,6 +29,17 @@ export function DashboardNav({ activeTab }: DashboardNavProps) {
         }`}
       >
         Overview
+      </Link>
+      <Link
+        href={dataIntakeHref}
+        scroll={false}
+        className={`rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition ${
+          activeTab === "data_intake"
+            ? "bg-accent text-white shadow-[0_8px_20px_-12px_rgba(6,115,166,0.9)]"
+            : "text-muted hover:text-foreground"
+        }`}
+      >
+        Data Intake
       </Link>
       <Link
         href={statisticsHref}

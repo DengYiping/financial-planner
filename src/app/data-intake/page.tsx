@@ -6,14 +6,14 @@ import { getServerTrpcCaller } from "@/trpc/server";
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
-export default async function OverviewPage({
+export default async function DataIntakePage({
   searchParams,
 }: {
   searchParams?: SearchParams | Promise<SearchParams>;
 }) {
   const resolvedSearchParams = (await searchParams) ?? {};
   if (Object.keys(resolvedSearchParams).length > 0) {
-    redirect("/");
+    redirect("/data-intake");
   }
 
   const caller = await getServerTrpcCaller();
@@ -25,11 +25,11 @@ export default async function OverviewPage({
   return (
     <main className="mx-auto max-w-6xl px-5 pb-12 pt-10 sm:px-8 lg:pt-14">
       <DashboardHeader />
-      <DashboardNav activeTab="overview" />
+      <DashboardNav activeTab="data_intake" />
       <OverviewContent
         initialAccounts={initialAccounts}
         initialBudgetPlannerView={initialBudgetPlannerView}
-        mode="overview"
+        mode="data_intake"
       />
     </main>
   );
