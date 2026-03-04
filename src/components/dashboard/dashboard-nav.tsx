@@ -11,6 +11,7 @@ export function DashboardNav({ activeTab }: DashboardNavProps) {
   const overviewHref = tabPath("overview");
   const dataIntakeHref = tabPath("data_intake");
   const statisticsHref = tabPath("statistics");
+  const trendHref = tabPath("trend");
   const transactionsHref = tabPath("transactions");
   const accountSummaryHref = tabPath("account_summary");
   const rulesHref = tabPath("rules");
@@ -51,6 +52,17 @@ export function DashboardNav({ activeTab }: DashboardNavProps) {
         }`}
       >
         Statistics
+      </Link>
+      <Link
+        href={trendHref}
+        scroll={false}
+        className={`rounded-full px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition ${
+          activeTab === "trend"
+            ? "bg-accent text-white shadow-[0_8px_20px_-12px_rgba(6,115,166,0.9)]"
+            : "text-muted hover:text-foreground"
+        }`}
+      >
+        Trend
       </Link>
       <Link
         href={transactionsHref}

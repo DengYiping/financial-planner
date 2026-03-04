@@ -9,6 +9,7 @@ import {
   createTransactionRule,
   deleteCategory,
   deleteAccountById,
+  getCategorySpendingTrend,
   deleteTransactionRule,
   deleteTransactionForAccount,
   getDashboardBudgetPlannerView,
@@ -207,6 +208,23 @@ const spendingStatsViewSchema = z.object({
   compareIncomeMonth: monthKeySchema.optional(),
   compareIncomeCents: z.number().int().nonnegative(),
   compareIncomeTransactionCount: z.number().int().nonnegative(),
+});
+
+const trendFrequencySchema = z.enum(["day", "week", "month"]);
+const categorySpendingTrendPointSchema = z.object({
+  period: z.string().trim().min(1),
+  spentCents: z.number().int().nonnegative(),
+});
+const categorySpendingTrendSeriesSchema = z.object({
+  categoryName: z.string().trim().min(1),
+  points: z.array(categorySpendingTrendPointSchema),
+});
+const categorySpendingTrendViewSchema = z.object({
+  frequency: trendFrequencySchema,
+  startDate: z.string().trim().regex(bookingDateRegex, "startDate must use YYYY-MM-DD format."),
+  endDate: z.string().trim().regex(bookingDateRegex, "endDate must use YYYY-MM-DD format."),
+  periods: z.array(z.string().trim().min(1)),
+  series: z.array(categorySpendingTrendSeriesSchema),
 });
 
 const transactionRuleSchema = z.object({
@@ -1036,6 +1054,45 @@ export const accountsRouter = createTRPCRouter({
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Failed to load spending statistics.",
+        });
+      }
+    }),
+
+  spendingTrendView: publicProcedure
+    .input(
+      z.object({
+        frequency: trendFrequencySchema,
+        startDate: z.string().trim().regex(bookingDateRegex, "startDate must use YYYY-MM-DD format."),
+        endDate: z.string().trim().regex(bookingDateRegex, "endDate must use YYYY-MM-DD format."),
+      })
+    )
+    .output(categorySpendingTrendViewSchema)
+    .query(async ({ input }) => {
+      try {
+        return await getCategorySpendingTrend({
+          frequency: input.frequency,
+          startDate: input.startDate,
+          endDate: input.endDate,
+        });
+      } catch (error) {
+        if (error instanceof TRPCError) {
+          throw error;
+        }
+
+        if (
+          error instanceof Error &&
+          (error.message.includes("must use YYYY-MM-DD format.") ||
+            error.message.includes("must be less than or equal to endDate"))
+        ) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: error.message,
+          });
+        }
+
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Failed to load spending trend data.",
         });
       }
     }),

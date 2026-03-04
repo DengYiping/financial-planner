@@ -29,6 +29,7 @@ import {
 } from "@/lib/finance/rules";
 
 const MONTH_KEY_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+const DATE_KEY_PATTERN = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const USD_TO_EUR_RATE_NUMERATOR = 92;
 const USD_TO_EUR_RATE_DENOMINATOR = 100;
 
@@ -134,6 +135,32 @@ export type DashboardSpendingStatsView = {
   compareIncomeMonth?: string;
   compareIncomeCents: number;
   compareIncomeTransactionCount: number;
+};
+
+export type SpendingTrendFrequency = "day" | "week" | "month";
+
+export type CategorySpendingTrendPoint = {
+  period: string;
+  spentCents: number;
+};
+
+export type CategorySpendingTrendSeries = {
+  categoryName: string;
+  points: CategorySpendingTrendPoint[];
+};
+
+export type CategorySpendingTrendInput = {
+  frequency: SpendingTrendFrequency;
+  startDate: string;
+  endDate: string;
+};
+
+export type CategorySpendingTrendView = {
+  frequency: SpendingTrendFrequency;
+  startDate: string;
+  endDate: string;
+  periods: string[];
+  series: CategorySpendingTrendSeries[];
 };
 
 export type CreateAccountInput = {
@@ -294,6 +321,116 @@ function getPreviousMonthKeyFromMonthKey(monthKey: string): string | undefined {
 
   const date = new Date(Date.UTC(year, month - 1, 1));
   return getPreviousMonthKey(date);
+}
+
+function parseDateKeyToUtcDate(value: string, fieldName: string): Date {
+  if (!DATE_KEY_PATTERN.test(value)) {
+    throw new Error(`${fieldName} must use YYYY-MM-DD format.`);
+  }
+
+  const [yearToken, monthToken, dayToken] = value.split("-");
+  const year = Number.parseInt(yearToken ?? "", 10);
+  const month = Number.parseInt(monthToken ?? "", 10);
+  const day = Number.parseInt(dayToken ?? "", 10);
+
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    throw new Error(`${fieldName} must use YYYY-MM-DD format.`);
+  }
+
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    throw new Error(`${fieldName} must use YYYY-MM-DD format.`);
+  }
+
+  return date;
+}
+
+function formatUtcDateKey(date: Date): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(
+    date.getUTCDate()
+  ).padStart(2, "0")}`;
+}
+
+function formatUtcMonthKey(date: Date): string {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function addUtcDays(date: Date, days: number): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + days));
+}
+
+function addUtcMonths(date: Date, months: number): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1));
+}
+
+function getUtcWeekStartMonday(date: Date): Date {
+  const dayOfWeek = date.getUTCDay();
+  const offsetToMonday = (dayOfWeek + 6) % 7;
+  return addUtcDays(date, -offsetToMonday);
+}
+
+function buildSpendingTrendPeriods(
+  frequency: SpendingTrendFrequency,
+  startDate: Date,
+  endDate: Date
+): string[] {
+  if (frequency === "day") {
+    const periods: string[] = [];
+    for (
+      let cursor = startDate;
+      cursor.getTime() <= endDate.getTime();
+      cursor = addUtcDays(cursor, 1)
+    ) {
+      periods.push(formatUtcDateKey(cursor));
+    }
+    return periods;
+  }
+
+  if (frequency === "week") {
+    const periods: string[] = [];
+    const startWeek = getUtcWeekStartMonday(startDate);
+    const endWeek = getUtcWeekStartMonday(endDate);
+    for (
+      let cursor = startWeek;
+      cursor.getTime() <= endWeek.getTime();
+      cursor = addUtcDays(cursor, 7)
+    ) {
+      periods.push(formatUtcDateKey(cursor));
+    }
+    return periods;
+  }
+
+  const periods: string[] = [];
+  const startMonth = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), 1));
+  const endMonth = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), 1));
+  for (
+    let cursor = startMonth;
+    cursor.getTime() <= endMonth.getTime();
+    cursor = addUtcMonths(cursor, 1)
+  ) {
+    periods.push(formatUtcMonthKey(cursor));
+  }
+  return periods;
+}
+
+function getSpendingTrendPeriodExpression(
+  frequency: SpendingTrendFrequency,
+  effectiveDateExpr: ReturnType<typeof sql<string>>
+): ReturnType<typeof sql<string>> {
+  if (frequency === "day") {
+    return sql<string>`date(${effectiveDateExpr})`;
+  }
+
+  if (frequency === "week") {
+    // Week key uses the Monday start date (YYYY-MM-DD) for deterministic bucket grouping.
+    return sql<string>`date(${effectiveDateExpr}, '-' || ((cast(strftime('%w', ${effectiveDateExpr}) as integer) + 6) % 7) || ' days')`;
+  }
+
+  return sql<string>`substr(${effectiveDateExpr}, 1, 7)`;
 }
 
 function toRulePersistenceValues(input: ValidatedTransactionRuleWriteInput): {
@@ -1038,6 +1175,81 @@ async function listDashboardIncomeRowsByMonth(): Promise<DashboardIncomeMonthlyR
       transactionCount: Math.max(0, Math.trunc(toNumberValue(row.transactionCount))),
     }))
     .filter((row) => MONTH_KEY_PATTERN.test(row.month));
+}
+
+export async function getCategorySpendingTrend(
+  input: CategorySpendingTrendInput
+): Promise<CategorySpendingTrendView> {
+  const startDate = parseDateKeyToUtcDate(input.startDate, "startDate");
+  const endDate = parseDateKeyToUtcDate(input.endDate, "endDate");
+  if (startDate.getTime() > endDate.getTime()) {
+    throw new Error("startDate must be less than or equal to endDate.");
+  }
+
+  const periods = buildSpendingTrendPeriods(input.frequency, startDate, endDate);
+  const periodSet = new Set(periods);
+  const db = getFinanceDb();
+  const effectiveDateExpr = sql<string>`coalesce(${transactionsTable.deemedDate}, ${transactionsTable.bookingDate})`;
+  const periodExpr = getSpendingTrendPeriodExpression(input.frequency, effectiveDateExpr);
+  const categoryNameExpr = sql<string>`coalesce(${categories.name}, 'Uncategorized')`;
+  const normalizedCategoryNameExpr = sql<string>`lower(trim(coalesce(${categories.name}, '')))`;
+  const amountEurCentsExpr = sql<number>`case
+    when ${transactionsTable.currency} = 'EUR' then ${transactionsTable.amountCents}
+    when ${transactionsTable.currency} = 'USD' then cast(round((${transactionsTable.amountCents} * ${USD_TO_EUR_RATE_NUMERATOR}) / ${USD_TO_EUR_RATE_DENOMINATOR}) as integer)
+    else ${transactionsTable.amountCents}
+  end`;
+  const spentCentsExpr = sql<number>`coalesce(sum(${amountEurCentsExpr}), 0)`;
+
+  const rows = await db
+    .select({
+      period: periodExpr,
+      categoryName: categoryNameExpr,
+      spentCents: spentCentsExpr,
+    })
+    .from(transactionsTable)
+    .leftJoin(categories, eq(categories.id, transactionsTable.categoryId))
+    .where(
+      and(
+        eq(transactionsTable.direction, "out"),
+        sql`${effectiveDateExpr} >= ${input.startDate}`,
+        sql`${effectiveDateExpr} <= ${input.endDate}`,
+        sql`${normalizedCategoryNameExpr} <> 'excluded'`
+      )
+    )
+    .groupBy(periodExpr, categoryNameExpr)
+    .orderBy(asc(periodExpr), asc(categoryNameExpr));
+
+  const valuesByCategory = new Map<string, Map<string, number>>();
+  rows.forEach((row) => {
+    if (!periodSet.has(row.period)) {
+      return;
+    }
+
+    const existingCategoryValues = valuesByCategory.get(row.categoryName);
+    const categoryValues = existingCategoryValues ?? new Map<string, number>();
+    categoryValues.set(row.period, Math.max(0, Math.trunc(toNumberValue(row.spentCents))));
+    if (!existingCategoryValues) {
+      valuesByCategory.set(row.categoryName, categoryValues);
+    }
+  });
+
+  const series = Array.from(valuesByCategory.entries())
+    .sort(([leftCategory], [rightCategory]) => leftCategory.localeCompare(rightCategory))
+    .map(([categoryName, valuesByPeriod]) => ({
+      categoryName,
+      points: periods.map((period) => ({
+        period,
+        spentCents: valuesByPeriod.get(period) ?? 0,
+      })),
+    }));
+
+  return {
+    frequency: input.frequency,
+    startDate: input.startDate,
+    endDate: input.endDate,
+    periods,
+    series,
+  };
 }
 
 export async function getDashboardBudgetPlannerView(): Promise<DashboardBudgetPlannerView> {

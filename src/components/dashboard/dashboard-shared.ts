@@ -4,6 +4,7 @@ export type DashboardTab =
   | "overview"
   | "data_intake"
   | "statistics"
+  | "trend"
   | "transactions"
   | "account_summary"
   | "rules"
@@ -41,6 +42,9 @@ export type AccountImportSummary = {
 };
 
 const MONTH_KEY_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+export type TrendFrequency = "day" | "week" | "month";
 
 export type AccountState = {
   id: number;
@@ -134,6 +138,93 @@ export function normalizeSummaryMonthKey(value: string | null): string {
   }
 
   return "";
+}
+
+function formatIsoDate(date: Date): string {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function parseIsoDate(value: string | null): Date | null {
+  if (!value || !ISO_DATE_PATTERN.test(value)) {
+    return null;
+  }
+
+  const [yearToken, monthToken, dayToken] = value.split("-");
+  const year = Number.parseInt(yearToken ?? "", 10);
+  const month = Number.parseInt(monthToken ?? "", 10);
+  const day = Number.parseInt(dayToken ?? "", 10);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return null;
+  }
+
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month - 1 ||
+    parsed.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return parsed;
+}
+
+export function normalizeTrendFrequency(value: string | null): TrendFrequency {
+  if (value === "day" || value === "week" || value === "month") {
+    return value;
+  }
+
+  return "month";
+}
+
+export function normalizeIsoDate(value: string | null): string | undefined {
+  const parsed = parseIsoDate(value);
+  return parsed ? formatIsoDate(parsed) : undefined;
+}
+
+export function getDefaultTrendRange(now: Date = new Date()): {
+  startDate: string;
+  endDate: string;
+} {
+  const year = now.getUTCFullYear();
+  const monthIndex = now.getUTCMonth();
+  const endOfPreviousMonth = new Date(Date.UTC(year, monthIndex, 0));
+  const startOfThreeMonthsWindow = new Date(
+    Date.UTC(endOfPreviousMonth.getUTCFullYear(), endOfPreviousMonth.getUTCMonth() - 2, 1)
+  );
+
+  return {
+    startDate: formatIsoDate(startOfThreeMonthsWindow),
+    endDate: formatIsoDate(endOfPreviousMonth),
+  };
+}
+
+export function normalizeTrendDateRange(
+  startDate: string | null,
+  endDate: string | null,
+  now: Date = new Date()
+): {
+  startDate: string;
+  endDate: string;
+} {
+  const defaults = getDefaultTrendRange(now);
+  const normalizedStartDate = normalizeIsoDate(startDate) ?? defaults.startDate;
+  const normalizedEndDate = normalizeIsoDate(endDate) ?? defaults.endDate;
+
+  if (normalizedStartDate <= normalizedEndDate) {
+    return {
+      startDate: normalizedStartDate,
+      endDate: normalizedEndDate,
+    };
+  }
+
+  return {
+    startDate: normalizedEndDate,
+    endDate: normalizedStartDate,
+  };
 }
 
 export function resolveErrorMessage(error: unknown, fallback: string): string {
@@ -276,6 +367,10 @@ export function tabPath(tab: DashboardTab): string {
 
   if (tab === "statistics") {
     return "/statistics";
+  }
+
+  if (tab === "trend") {
+    return "/trend";
   }
 
   if (tab === "transactions") {

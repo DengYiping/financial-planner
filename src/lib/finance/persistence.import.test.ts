@@ -102,6 +102,7 @@ async function createFinanceSchemaForTests(): Promise<void> {
         "source_id text NOT NULL," +
         "provider text NOT NULL," +
         "booking_date text NOT NULL," +
+        "deemed_date text," +
         "amount_cents integer NOT NULL," +
         "currency text NOT NULL," +
         "direction text NOT NULL," +

@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "test:parsers": "node --import tsx --test src/lib/parsers/*.test.ts",
-    "test:import": "node --import tsx --test src/lib/finance/import-dedupe.test.ts src/lib/finance/persistence.import.test.ts src/server/api/routers/accounts.import.test.ts",
+    "test:import": "node --import tsx --test src/lib/finance/import-dedupe.test.ts src/lib/finance/persistence.import.test.ts src/lib/finance/persistence.trend.test.ts src/server/api/routers/accounts.import.test.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
@@ -25,6 +25,7 @@
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "recharts": "^3.7.0",
     "server-only": "^0.0.1",
     "zod": "^4.3.6"
   },
